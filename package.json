@@ -1,0 +1,57 @@
+{
+  "name": "@prismer/agent-core",
+  "version": "0.3.0",
+  "description": "Lumin — lightweight agent runtime for academic research (4,665 LOC, replaces OpenClaw 892K LOC)",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "lumin": "dist/cli.js"
+  },
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./agent": { "types": "./dist/agent.d.ts", "default": "./dist/agent.js" },
+    "./provider": { "types": "./dist/provider.d.ts", "default": "./dist/provider.js" },
+    "./tools": { "types": "./dist/tools.d.ts", "default": "./dist/tools.js" },
+    "./session": { "types": "./dist/session.d.ts", "default": "./dist/session.js" },
+    "./memory": { "types": "./dist/memory.d.ts", "default": "./dist/memory.js" },
+    "./hooks": { "types": "./dist/hooks.d.ts", "default": "./dist/hooks.js" },
+    "./compaction": { "types": "./dist/compaction.d.ts", "default": "./dist/compaction.js" },
+    "./schemas": { "types": "./dist/schemas.d.ts", "default": "./dist/schemas.js" },
+    "./sse": { "types": "./dist/sse.d.ts", "default": "./dist/sse.js" },
+    "./directives": { "types": "./dist/directives.d.ts", "default": "./dist/directives.js" },
+    "./server": { "types": "./dist/server.d.ts", "default": "./dist/server.js" },
+    "./log": { "types": "./dist/log.d.ts", "default": "./dist/log.js" },
+    "./config": { "types": "./dist/config.d.ts", "default": "./dist/config.js" }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "start": "node dist/cli.js serve"
+  },
+  "dependencies": {
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "tsx": "^4.19.0",
+    "vitest": "^3.0.0",
+    "@types/node": "^22.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/prismer/library",
+    "directory": "docker/agent"
+  },
+  "keywords": ["agent", "llm", "openai", "tool-calling", "academic", "runtime"],
+  "license": "MIT"
+}

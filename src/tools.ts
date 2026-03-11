@@ -1,0 +1,112 @@
+/**
+ * Tool Registry — registration, dispatch, and spec generation.
+ *
+ * The {@link ToolRegistry} holds all available tools and converts them
+ * to OpenAI-compatible {@link ToolSpec} arrays for the LLM. Execution
+ * is dispatched through {@link ToolRegistry.execute}.
+ *
+ * @module tools
+ */
+
+import type { ToolSpec } from './provider.js';
+
+// ── Interfaces ───────────────────────────────────────────
+
+/** Runtime context passed to every tool execution. */
+export interface ToolContext {
+  workspaceDir: string;
+  sessionId: string;
+  agentId: string;
+  emit: (event: ToolEvent) => void;
+}
+
+/** Event emitted by a tool during execution via {@link ToolContext.emit}. */
+export interface ToolEvent {
+  type: 'directive' | 'progress' | 'output';
+  data: Record<string, unknown>;
+}
+
+/**
+ * A single tool that can be executed by the agent.
+ * Implementations must provide a JSON Schema `parameters` object
+ * and an async `execute` function.
+ */
+export interface Tool {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>; // JSON Schema
+  execute(args: Record<string, unknown>, ctx: ToolContext): Promise<string>;
+}
+
+// ── Tool Registry ────────────────────────────────────────
+
+/**
+ * Registry of available tools. Supports registration, lookup,
+ * spec generation for the LLM, and dispatched execution.
+ */
+export class ToolRegistry {
+  private tools = new Map<string, Tool>();
+
+  register(tool: Tool): void {
+    this.tools.set(tool.name, tool);
+  }
+
+  registerMany(tools: Tool[]): void {
+    for (const tool of tools) {
+      this.register(tool);
+    }
+  }
+
+  get(name: string): Tool | undefined {
+    return this.tools.get(name);
+  }
+
+  has(name: string): boolean {
+    return this.tools.has(name);
+  }
+
+  list(): Tool[] {
+    return Array.from(this.tools.values());
+  }
+
+  /** Generate OpenAI-compatible tool specs for LLM */
+  getSpecs(allowedTools?: string[]): ToolSpec[] {
+    const tools = allowedTools
+      ? this.list().filter(t => allowedTools.includes(t.name))
+      : this.list();
+
+    return tools.map(t => ({
+      type: 'function' as const,
+      function: {
+        name: t.name,
+        description: t.description,
+        parameters: t.parameters,
+      },
+    }));
+  }
+
+  /** Execute a tool by name */
+  async execute(
+    name: string,
+    args: Record<string, unknown>,
+    ctx: ToolContext,
+  ): Promise<{ output: string; error?: string }> {
+    const tool = this.tools.get(name);
+    if (!tool) {
+      return { output: '', error: `Unknown tool: ${name}` };
+    }
+
+    try {
+      const output = await tool.execute(args, ctx);
+      return { output };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { output: '', error: message };
+    }
+  }
+
+  /** Number of registered tools */
+  get size(): number {
+    return this.tools.size;
+  }
+}

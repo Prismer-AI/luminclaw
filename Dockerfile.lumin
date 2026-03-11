@@ -1,0 +1,87 @@
+# ============================================================
+# Prismer Workspace Container — Lumin Edition
+# ============================================================
+#
+# Standalone agent runtime — no OpenClaw dependency.
+# Built directly on C1 (academic base with Python, Node.js, LaTeX, Jupyter).
+#
+# Contains:
+#   - Lumin agent runtime (@prismer/lumin)
+#   - Prismer Workspace plugin (40+ academic tools)
+#   - Prismer IM channel plugin
+#   - Container unified gateway (service proxy)
+#   - Workspace templates and bootstrap
+#
+# Architecture:
+#   C1: prismer-academic:v5.1-lite   <- Python + Node + academic tools
+#   C3: prismer-workspace:lumin      <- this image (C1 + Lumin + plugins)
+#
+# Build:
+#   docker build -f Dockerfile.lumin \
+#     --build-arg BASE_IMAGE=docker.prismer.dev/prismer-academic:v5.1-lite \
+#     -t prismer-workspace:lumin .
+#
+# ============================================================
+
+ARG BASE_IMAGE=docker.prismer.dev/prismer-academic:v5.1-lite
+
+FROM ${BASE_IMAGE}
+
+USER root
+
+# ─── Copy Prismer plugins ─────────────────────────────────
+COPY plugin/prismer-im /opt/prismer/plugins/prismer-im
+COPY plugin/prismer-workspace /opt/prismer/plugins/prismer-workspace
+
+# ─── Install plugin dependencies + compile TypeScript ────
+RUN cd /opt/prismer/plugins/prismer-im && npm install --omit=dev 2>/dev/null || true
+RUN cd /opt/prismer/plugins/prismer-workspace && \
+    npm install --save-dev typescript@5 && \
+    npx tsc --noUnusedLocals false --noUnusedParameters false --skipLibCheck true || true && \
+    test -f dist/src/tools.js && echo "[plugin] Compiled OK" || echo "[plugin] WARN: dist/src/tools.js missing" && \
+    rm -rf node_modules/typescript
+
+# ─── Build Lumin agent runtime ────────────────────────────
+COPY agent/ /opt/prismer/lumin/
+RUN cd /opt/prismer/lumin && \
+    npm install --omit=dev && \
+    npx tsc && \
+    # Cleanup source + dev artifacts
+    rm -rf src/ node_modules/.cache 2>/dev/null || true
+
+# ─── Copy config, skills, templates ───────────────────────
+COPY config/workspace/skills/ /opt/prismer/config/skills/
+COPY templates/ /opt/prismer/templates/
+COPY scripts/bootstrap-workspace.sh /opt/prismer/scripts/bootstrap-workspace.sh
+COPY scripts/prismer-tools/jupyter-runner.py /opt/prismer/scripts/jupyter-runner.py
+RUN chmod +x /opt/prismer/scripts/bootstrap-workspace.sh /opt/prismer/scripts/jupyter-runner.py
+
+# ─── Copy container gateway (service proxy) ───────────────
+COPY gateway/ /app/gateway/
+
+# ─── Copy version manifest ───────────────────────────────
+COPY versions-manifest.json /opt/prismer/versions.json
+
+# ─── Permissions ─────────────────────────────────────────
+RUN find /opt/prismer -type d -exec chmod 755 {} + && \
+    find /opt/prismer -type f -exec chmod 644 {} + && \
+    chmod +x /opt/prismer/lumin/dist/cli.js && \
+    chown -R user:user /opt/prismer
+
+# ─── Entrypoint ──────────────────────────────────────────
+COPY lumin-entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+# ─── Fix npm cache ownership ─────────────────────────────
+RUN rm -rf /home/user/.npm/_cacache 2>/dev/null || true
+
+# ─── Make lumin CLI globally available ────────────────────
+RUN ln -sf /opt/prismer/lumin/dist/cli.js /usr/local/bin/lumin
+
+# ─── Workspace ───────────────────────────────────────────
+USER user
+WORKDIR /workspace
+
+EXPOSE 3000 3001
+
+ENTRYPOINT ["/app/entrypoint.sh"]
