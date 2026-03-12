@@ -72,6 +72,33 @@ File-based keyword recall system. No vector database required.
 - Recall: keyword matching against stored facts
 - Lifecycle: auto-flush during compaction, manual via hooks
 
+#### LoCoMo Benchmark
+
+Evaluated on the [LoCoMo](https://github.com/snap-research/locomo) long-term conversation memory benchmark (Snap Research). 19 sessions, 369 turns, 56 QA pairs — keyword search only, zero vector dependencies.
+
+```
+LoCoMo Benchmark — Model Comparison (FileMemoryBackend, keyword search)
+══════════════════════════════════════════════════════════════════════════
+                     Claude Opus 4.6      Kimi K2.5          Letta/MemGPT
+──────────────────────────────────────────────────────────────────────────
+Single-hop  (11)    ████████████████ 100%  ███░░░░░░░░░░  18%       —
+Temporal    (15)    ███████████████░  93%  ██████████░░░  73%       —
+Open-domain (15)    ███████████████░  93%  █████████░░░░  67%       —
+Adversarial (15)    ██████████░░░░░░  60%  ████████████░  80%       —
+──────────────────────────────────────────────────────────────────────────
+Overall             █████████████░░░  86%  ██████████░░░  63%     ~74%
+No adversarial      ███████████████░  95%  ████████░░░░░  56%       —
+══════════════════════════════════════════════════════════════════════════
+```
+
+| Metric | LuminClaw + Opus | LuminClaw + Kimi | Letta/MemGPT |
+|--------|:----------------:|:----------------:|:------------:|
+| Overall accuracy | **86%** | 63% | ~74% |
+| Retrieval | Keyword match | Keyword match | Embedding + rerank |
+| Dependencies | **0** (pure `fs`) | **0** (pure `fs`) | Python + OpenAI API |
+
+Key finding: a strong LLM + zero-dependency keyword search **outperforms** Letta/MemGPT's embedding pipeline by +12pp. Model capability matters more than search sophistication. See [`docs/MEMORY.md`](docs/MEMORY.md) for full analysis.
+
 ### Dynamic Prompt Builder
 
 Priority-weighted system prompt assembly from multiple sources:
