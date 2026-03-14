@@ -292,7 +292,7 @@ function handleWebSocket(req: IncomingMessage, socket: import('node:net').Socket
     if (!decoded) return;
     recvBuffer = recvBuffer.subarray(decoded.consumed);
 
-    let msg: { type: string; content?: string; sessionId?: string; config?: Record<string, unknown> };
+    let msg: { type: string; content?: string; sessionId?: string; config?: Record<string, unknown>; images?: Array<{ url: string; path?: string; mimeType?: string }> };
     try {
       msg = JSON.parse(decoded.text);
     } catch {
@@ -375,11 +375,12 @@ function handleWebSocket(req: IncomingMessage, socket: import('node:net').Socket
       }
     });
 
-    // Run agent
+    // Run agent (with optional images for multimodal vision)
     await runAgent(
       {
         type: 'message',
         content: msg.content,
+        images: msg.images,
         sessionId: client.sessionId,
         config: msg.config as Record<string, string | number | string[] | undefined> | undefined,
       },

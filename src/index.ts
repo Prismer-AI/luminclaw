@@ -326,7 +326,7 @@ export async function runAgent(input: InputMessage, opts: RunAgentOptions = {}):
   });
 
   try {
-    const result = await agent.processMessage(input.content ?? '', session);
+    const result = await agent.processMessage(input.content ?? '', session, undefined, input.images);
 
     if (opts.onResult) {
       opts.onResult(result, sessionId);

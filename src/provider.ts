@@ -20,10 +20,31 @@ const log = createLogger('provider');
 
 // ── Schemas ──────────────────────────────────────────────
 
+/**
+ * Content block for multimodal messages (OpenAI-compatible format).
+ * Used when a user message contains both text and images.
+ */
+export const ContentBlockSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('text'), text: z.string() }),
+  z.object({
+    type: z.literal('image_url'),
+    image_url: z.object({
+      url: z.string(),
+      detail: z.enum(['auto', 'low', 'high']).optional(),
+    }),
+  }),
+]);
+
+export type ContentBlock = z.infer<typeof ContentBlockSchema>;
+
 /** Zod schema for a single conversation message (system, user, assistant, or tool). */
 export const MessageSchema = z.object({
   role: z.enum(['system', 'user', 'assistant', 'tool']),
-  content: z.string().nullable(),
+  /** Text content (string) or multimodal content blocks (array) */
+  content: z.union([
+    z.string(),
+    z.array(ContentBlockSchema),
+  ]).nullable(),
   name: z.string().optional(),
   toolCallId: z.string().optional(),
   reasoningContent: z.string().optional(),

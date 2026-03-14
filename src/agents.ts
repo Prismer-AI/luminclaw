@@ -81,7 +81,7 @@ export const BUILTIN_AGENTS: AgentConfig[] = [
     id: 'researcher',
     name: 'Research Assistant',
     mode: 'primary',
-    systemPrompt: `You are a Prismer research assistant — an AI-powered academic research companion.
+    systemPrompt: `You are a research assistant — an AI-powered academic research companion.
 You help researchers with paper discovery, reading, data analysis, writing, and peer review.
 You have access to specialized sub-agents that you can delegate tasks to:
 - @latex-expert: LaTeX document writing and compilation

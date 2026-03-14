@@ -19,9 +19,23 @@ export const OUTPUT_END = '---LUMIN_OUTPUT_END---';
 
 // ── Input Schema (Host → Container via stdin) ────────────
 
+/** Image reference for multimodal (vision) input */
+export const ImageRefSchema = z.object({
+  /** CDN URL or data URI of the image */
+  url: z.string(),
+  /** Container-local path (if available) */
+  path: z.string().optional(),
+  /** MIME type (e.g. image/png) */
+  mimeType: z.string().optional(),
+});
+
+export type ImageRef = z.infer<typeof ImageRefSchema>;
+
 export const InputMessageSchema = z.object({
   type: z.enum(['message', 'health', 'shutdown']),
   content: z.string().optional(),
+  /** Image references for multimodal (vision) input */
+  images: z.array(ImageRefSchema).optional(),
   sessionId: z.string().optional(),
   config: z.object({
     model: z.string().optional(),

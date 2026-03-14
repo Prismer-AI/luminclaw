@@ -240,7 +240,7 @@ export class PrismerAgent {
   }
 
   /** Main entry point — process a user message through the agent loop */
-  async processMessage(input: string, session: Session, memoryContext?: string): Promise<AgentResult> {
+  async processMessage(input: string, session: Session, memoryContext?: string, images?: import('./ipc.js').ImageRef[]): Promise<AgentResult> {
     const startMs = Date.now();
 
     // Parse /think, /t, /nothink directives
@@ -272,8 +272,8 @@ export class PrismerAgent {
       return result;
     }
 
-    // Build messages with system prompt + memory + history
-    const messages = session.buildMessages(cleanInput, this.systemPrompt, memoryContext);
+    // Build messages with system prompt + memory + history + optional images
+    const messages = session.buildMessages(cleanInput, this.systemPrompt, memoryContext, images);
 
     // Get tool specs (filter by agent config if sub-agent)
     const agentConfig = this.agents.get(this.agentId);
@@ -324,7 +324,7 @@ export class PrismerAgent {
       if (this.hooks && iteration === 1) {
         const sysIdx = messages.findIndex(m => m.role === 'system');
         if (sysIdx >= 0 && messages[sysIdx].content) {
-          messages[sysIdx].content = await this.hooks.runBeforePrompt(hookCtx, messages[sysIdx].content!);
+          messages[sysIdx].content = await this.hooks.runBeforePrompt(hookCtx, messages[sysIdx].content as string);
         }
       }
 

@@ -69,6 +69,52 @@ function parseFrontmatter(raw: string): { meta: SkillMeta; body: string } {
   return { meta: { name, description, userInvocable }, body: match[2] };
 }
 
+// ── Skill Body Sanitization ─────────────────────────────
+
+/**
+ * Patterns that indicate a skill is trying to override agent behavior
+ * in ways that cause context pollution (e.g., forcing self-introduction
+ * or capability recitation on every response).
+ */
+const POISON_PATTERNS: RegExp[] = [
+  /always\s+introduce\s+yourself/gi,
+  /describe\s+your\s+capabilities/gi,
+  /list\s+your\s+(features|abilities|capabilities)/gi,
+  /tell\s+the\s+user\s+what\s+you\s+can\s+do/gi,
+  /mention\s+your\s+name\s+in\s+every\s+(response|reply|message)/gi,
+  /start\s+every\s+(response|reply|message)\s+with/gi,
+  /in\s+every\s+(response|reply|message)\s*,?\s*(you\s+)?(must|should|always)/gi,
+  /you\s+are\s+an?\s+\w+\s+assistant\s+that\s+(always|must)\s/gi,
+  /always\s+(start|begin)\s+(by|with)\s+(introducing|describing|listing)/gi,
+];
+
+/** Max characters per individual skill body */
+const MAX_PER_SKILL_CHARS = 8_000;
+
+/**
+ * Sanitize a skill body to prevent context pollution.
+ * Removes known poisonous patterns and enforces size limits.
+ */
+function sanitizeSkillBody(body: string, skillName: string): string {
+  let sanitized = body;
+
+  for (const pattern of POISON_PATTERNS) {
+    // Reset lastIndex for global regex
+    pattern.lastIndex = 0;
+    if (pattern.test(sanitized)) {
+      pattern.lastIndex = 0;
+      sanitized = sanitized.replace(pattern, '[removed: behavioral override]');
+    }
+  }
+
+  // Enforce per-skill size limit
+  if (sanitized.length > MAX_PER_SKILL_CHARS) {
+    sanitized = sanitized.slice(0, MAX_PER_SKILL_CHARS - 30) + '\n\n[... truncated ...]';
+  }
+
+  return sanitized;
+}
+
 // ── SkillLoader ──────────────────────────────────────────
 
 export class SkillLoader {
@@ -78,7 +124,7 @@ export class SkillLoader {
 
   constructor(
     private dirs: string[] = getDefaultSkillDirs(),
-    private maxTotalChars = 40_000,
+    private maxTotalChars = 20_000,
     cacheTtlMs = 30_000,
   ) {
     this.cacheTtlMs = cacheTtlMs;
@@ -138,7 +184,11 @@ export class SkillLoader {
     let totalChars = 0;
 
     for (const skill of skills) {
-      const content = skill.body.trim();
+      const raw = skill.body.trim();
+      if (!raw) continue;
+
+      // Sanitize: strip poison patterns + enforce per-skill size limit
+      const content = sanitizeSkillBody(raw, skill.meta.name);
       if (!content) continue;
 
       // Enforce total budget
