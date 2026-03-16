@@ -1,0 +1,326 @@
+{
+  "startTime": "2026-03-13T17:36:58.714Z",
+  "endTime": "2026-03-13T17:41:11.862Z",
+  "totalDurationMs": 253148,
+  "model": "us-kimi-k2.5",
+  "factCount": 12,
+  "cycleCount": 4,
+  "cycles": [
+    {
+      "cycle": 1,
+      "factsSeeded": [
+        "F01",
+        "F02",
+        "F03"
+      ],
+      "allFactsTested": [
+        "F01",
+        "F02",
+        "F03"
+      ],
+      "memoryRecallRate": 1,
+      "memoryDetails": [
+        {
+          "factId": "F01",
+          "found": true,
+          "bestScore": 1
+        },
+        {
+          "factId": "F02",
+          "found": true,
+          "bestScore": 0.75
+        },
+        {
+          "factId": "F03",
+          "found": true,
+          "bestScore": 1
+        }
+      ],
+      "compactionSummaryLength": 386,
+      "memoryFlushLength": 252,
+      "durationMs": 37144
+    },
+    {
+      "cycle": 2,
+      "factsSeeded": [
+        "F04",
+        "F05",
+        "F06"
+      ],
+      "allFactsTested": [
+        "F01",
+        "F02",
+        "F03",
+        "F04",
+        "F05",
+        "F06"
+      ],
+      "memoryRecallRate": 0.5,
+      "memoryDetails": [
+        {
+          "factId": "F01",
+          "found": true,
+          "bestScore": 1
+        },
+        {
+          "factId": "F02",
+          "found": true,
+          "bestScore": 0.75
+        },
+        {
+          "factId": "F03",
+          "found": true,
+          "bestScore": 1
+        },
+        {
+          "factId": "F04",
+          "found": false,
+          "bestScore": 0
+        },
+        {
+          "factId": "F05",
+          "found": false,
+          "bestScore": 0
+        },
+        {
+          "factId": "F06",
+          "found": false,
+          "bestScore": 0
+        }
+      ],
+      "compactionSummaryLength": 358,
+      "memoryFlushLength": 252,
+      "durationMs": 36110
+    },
+    {
+      "cycle": 3,
+      "factsSeeded": [
+        "F07",
+        "F08",
+        "F09"
+      ],
+      "allFactsTested": [
+        "F01",
+        "F02",
+        "F03",
+        "F04",
+        "F05",
+        "F06",
+        "F07",
+        "F08",
+        "F09"
+      ],
+      "memoryRecallRate": 0.6666666666666666,
+      "memoryDetails": [
+        {
+          "factId": "F01",
+          "found": true,
+          "bestScore": 1
+        },
+        {
+          "factId": "F02",
+          "found": true,
+          "bestScore": 0.75
+        },
+        {
+          "factId": "F03",
+          "found": true,
+          "bestScore": 1
+        },
+        {
+          "factId": "F04",
+          "found": false,
+          "bestScore": 0
+        },
+        {
+          "factId": "F05",
+          "found": false,
+          "bestScore": 0
+        },
+        {
+          "factId": "F06",
+          "found": false,
+          "bestScore": 0
+        },
+        {
+          "factId": "F07",
+          "found": true,
+          "bestScore": 1
+        },
+        {
+          "factId": "F08",
+          "found": true,
+          "bestScore": 1
+        },
+        {
+          "factId": "F09",
+          "found": true,
+          "bestScore": 1
+        }
+      ],
+      "compactionSummaryLength": 950,
+      "memoryFlushLength": 603,
+      "durationMs": 42260
+    },
+    {
+      "cycle": 4,
+      "factsSeeded": [
+        "F10",
+        "F11",
+        "F12"
+      ],
+      "allFactsTested": [
+        "F01",
+        "F02",
+        "F03",
+        "F04",
+        "F05",
+        "F06",
+        "F07",
+        "F08",
+        "F09",
+        "F10",
+        "F11",
+        "F12"
+      ],
+      "memoryRecallRate": 0.5833333333333334,
+      "memoryDetails": [
+        {
+          "factId": "F01",
+          "found": true,
+          "bestScore": 1
+        },
+        {
+          "factId": "F02",
+          "found": true,
+          "bestScore": 0.75
+        },
+        {
+          "factId": "F03",
+          "found": true,
+          "bestScore": 1
+        },
+        {
+          "factId": "F04",
+          "found": false,
+          "bestScore": 0
+        },
+        {
+          "factId": "F05",
+          "found": false,
+          "bestScore": 0
+        },
+        {
+          "factId": "F06",
+          "found": false,
+          "bestScore": 0
+        },
+        {
+          "factId": "F07",
+          "found": true,
+          "bestScore": 1
+        },
+        {
+          "factId": "F08",
+          "found": true,
+          "bestScore": 1
+        },
+        {
+          "factId": "F09",
+          "found": true,
+          "bestScore": 1
+        },
+        {
+          "factId": "F10",
+          "found": true,
+          "bestScore": 0.25
+        },
+        {
+          "factId": "F11",
+          "found": false,
+          "bestScore": 0
+        },
+        {
+          "factId": "F12",
+          "found": false,
+          "bestScore": 0
+        }
+      ],
+      "compactionSummaryLength": 574,
+      "memoryFlushLength": 603,
+      "durationMs": 42998
+    }
+  ],
+  "finalLLMRecall": {
+    "results": [
+      {
+        "factId": "F01",
+        "recalled": true,
+        "responseSnippet": "Based on our previous session memory from **2026-03-13 at 01:37**, the exact calibration coefficient for your spectrometer is:\n\n**0.03847**"
+      },
+      {
+        "factId": "F02",
+        "recalled": true,
+        "responseSnippet": "Based on the memory from our previous sessions, the project supervisor is **Professor Yolanda Marchetti** from the **University of Bologna**."
+      },
+      {
+        "factId": "F03",
+        "recalled": true,
+        "responseSnippet": "Based on the memory from our previous session (timestamp 01:37), the file path to your primary dataset is:\n\n**`/data/experiments/2026-crystallography/run-47b.parquet`**"
+      },
+      {
+        "factId": "F04",
+        "recalled": false,
+        "responseSnippet": ""
+      },
+      {
+        "factId": "F05",
+        "recalled": false,
+        "responseSnippet": ""
+      },
+      {
+        "factId": "F06",
+        "recalled": false,
+        "responseSnippet": ""
+      },
+      {
+        "factId": "F07",
+        "recalled": true,
+        "responseSnippet": "Based on the recalled memory from our previous session (2026-03-13, 01:38):\n\n**Dr. Takeshi Yamamoto** from **Kyoto University** developed the original chlorophyll extraction protocol (which you subseq"
+      },
+      {
+        "factId": "F08",
+        "recalled": true,
+        "responseSnippet": "Based on the memory from our previous session (01:38), you are using **Apache Pulsar** as the message broker, with the namespace **`prismer-bio`**.\n\nAdditional configuration details recalled:\n- **Part"
+      },
+      {
+        "factId": "F09",
+        "recalled": true,
+        "responseSnippet": "Based on the memory from our previous session (timestamp 01:38), the **ICML 2027 submission deadline is January 23rd**.\n\nRelated context from that same discussion: There is an action item to complete "
+      },
+      {
+        "factId": "F10",
+        "recalled": false,
+        "responseSnippet": ""
+      },
+      {
+        "factId": "F11",
+        "recalled": false,
+        "responseSnippet": "I don't have any record of discussing PyTorch version pinning in the available memory from our previous sessions. The memory I have access to covers:\n\n- Spectrometer calibration and crystallography da"
+      },
+      {
+        "factId": "F12",
+        "recalled": false,
+        "responseSnippet": ""
+      }
+    ],
+    "recallRate": 0.5
+  },
+  "memoryRecallCurve": [
+    1,
+    0.5,
+    0.6666666666666666,
+    0.5833333333333334
+  ],
+  "chart": "\nMemory Store Recall by Compaction Cycle\n───────────────────────────────────────────────────────\nCycle 1 │████████████████████  100%  3/3\nCycle 2 │██████████░░░░░░░░░░   50%  3/6\nCycle 3 │█████████████░░░░░░░   67%  6/9\nCycle 4 │████████████░░░░░░░░   58%  7/12\n───────────────────────────────────────────────────────\nFinal LLM Recall (with memory context):  50%\n"
+}

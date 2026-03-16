@@ -81,56 +81,45 @@ export const BUILTIN_AGENTS: AgentConfig[] = [
     id: 'researcher',
     name: 'Research Assistant',
     mode: 'primary',
-    systemPrompt: `You are a Prismer research assistant — an AI-powered academic research companion.
-You help researchers with paper discovery, reading, data analysis, writing, and peer review.
-You have access to specialized sub-agents that you can delegate tasks to:
-- @latex-expert: LaTeX document writing and compilation
-- @data-analyst: Jupyter notebooks, data analysis, and visualization
-- @literature-scout: Paper search, PDF reading, and literature review
+    systemPrompt: `You are a helpful AI assistant with access to tools.
+You can delegate tasks to specialized sub-agents:
+- @writer: Document writing and formatting
+- @analyst: Data analysis and visualization
+- @scout: Research and information gathering
 
 When a task clearly falls within a sub-agent's expertise, use the "delegate" tool to hand it off.
-For general questions, answer directly.
-
-Always be precise, cite sources when available, and prefer reproducible methods.`,
+For general questions, answer directly.`,
     tools: null, // All tools
     maxIterations: 40,
   },
 
   {
-    id: 'latex-expert',
-    name: 'LaTeX Expert',
+    id: 'writer',
+    name: 'Writer',
     mode: 'subagent',
-    systemPrompt: `You are a LaTeX expert specializing in academic paper writing.
-You can compile LaTeX documents, manage project files, and help with formatting.
-Supported templates: CVPR, NeurIPS, ICML, ACL, IEEE, arXiv.
-Always validate LaTeX syntax before compilation.
-Use switch_component to show the latex-editor when working on documents.`,
-    tools: ['latex_compile', 'latex_project', 'switch_component', 'update_content', 'bash'],
+    systemPrompt: `You are a writing assistant specializing in document creation and formatting.
+Help with drafting, editing, and structuring documents.`,
+    tools: null,
     maxIterations: 20,
   },
 
   {
-    id: 'data-analyst',
+    id: 'analyst',
     name: 'Data Analyst',
     mode: 'subagent',
-    systemPrompt: `You are a data analyst specializing in scientific computing and visualization.
-You can execute Jupyter notebook cells, create plots, and analyze datasets.
-Preferred libraries: numpy, pandas, matplotlib, seaborn, scipy, scikit-learn.
-Use switch_component to show the jupyter-notebook when working with code.
-Always include clear axis labels and titles in plots.`,
-    tools: ['jupyter_execute', 'jupyter_notebook', 'switch_component', 'update_content', 'bash'],
+    systemPrompt: `You are a data analyst specializing in computation and visualization.
+Help with data processing, analysis, plotting, and statistical computations.`,
+    tools: null,
     maxIterations: 20,
   },
 
   {
-    id: 'literature-scout',
-    name: 'Literature Scout',
+    id: 'scout',
+    name: 'Research Scout',
     mode: 'subagent',
-    systemPrompt: `You are a literature scout specializing in academic paper discovery and analysis.
-You can search arXiv, load PDFs, and extract key information from papers.
-When summarizing papers, include: title, authors, year, key contributions, methodology, and results.
-Organize literature reviews by theme, not chronologically.`,
-    tools: ['arxiv_search', 'load_pdf', 'context_search', 'switch_component', 'bash'],
+    systemPrompt: `You are a research scout specializing in information gathering and analysis.
+Help with searching, reading documents, and summarizing findings.`,
+    tools: null,
     maxIterations: 15,
   },
 

@@ -24,9 +24,9 @@
 
 import { writeOutput, readStdin } from './ipc.js';
 import { createLogger } from './log.js';
+import { VERSION } from './version.js';
 
 const log = createLogger('cli');
-const VERSION = '0.3.0';
 const args = process.argv.slice(2);
 const command = args[0];
 
@@ -65,8 +65,8 @@ Server options:
 Environment:
   OPENAI_API_BASE_URL    LLM API endpoint
   OPENAI_API_KEY         LLM API key
-  AGENT_DEFAULT_MODEL    Default model (default: us-kimi-k2.5)
-  WORKSPACE_DIR          Working directory (default: /workspace)
+  AGENT_DEFAULT_MODEL    Default model (default: gpt-4o)
+  WORKSPACE_DIR          Working directory (default: ./workspace)
   PRISMER_PLUGIN_PATH    Plugin tools path
   LUMIN_PORT             Server port (default: 3001)
 `);

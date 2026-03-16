@@ -33,7 +33,7 @@ const BUILTIN_REGISTRY: Record<string, { description: string; repo: string }> = 
 };
 
 export function createClawHubTool(skillLoader?: SkillLoader): Tool {
-  const workspaceDir = process.env.WORKSPACE_DIR || '/workspace';
+  const workspaceDir = process.env.WORKSPACE_DIR || './workspace';
   const skillsDir = `${workspaceDir}/skills`;
 
   return {

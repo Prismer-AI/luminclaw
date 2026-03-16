@@ -44,10 +44,8 @@ const PRIORITY = {
 
 // ── Default Identity (fallback when no SOUL.md) ──────────
 
-const DEFAULT_IDENTITY = `You are a Prismer research assistant — an AI-powered academic research companion.
-You help researchers with paper discovery, reading, data analysis, writing, and peer review.
-You have access to specialized tools for LaTeX, Jupyter, PDF viewing, notes, and more.
-When a task requires a specific tool, use it directly. Be precise and cite sources when available.`;
+const DEFAULT_IDENTITY = `You are a helpful AI assistant with access to tools.
+When a task requires a specific tool, use it directly. Be precise and thorough.`;
 
 // ── PromptBuilder ────────────────────────────────────────
 

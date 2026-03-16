@@ -1,15 +1,16 @@
-# CLAUDE.md — LuminClaw
+# CLAUDE.md — @prismer/agent-core
 
 ## Project Overview
 
-LuminClaw (`@prismer/agent-core`) is a lightweight, standalone agent runtime that implements
-the core capabilities of OpenClaw in ~4,500 LOC TypeScript. It is designed for the
-[Prismer.AI](https://github.com/Prismer-AI) academic research platform but can be used
-independently as a general-purpose agent framework.
+`@prismer/agent-core` is a lightweight, standalone agent runtime (~4,900 LOC TypeScript).
+OpenAI-compatible, zero heavy dependencies (only Zod). Designed for the
+[Prismer.AI](https://prismer.ai) academic research platform but works independently
+as a general-purpose agent framework.
 
-**Repository**: https://github.com/Prismer-AI/luminclaw
-**Main project**: https://github.com/Prismer-AI (private: gitlab.app:prismer/library)
-**Integration**: This repo is consumed as a git submodule at `docker/agent/` in the main project.
+**npm**: `@prismer/agent-core` v0.3.1
+**Repository**: https://github.com/prismer-ai/agent-core
+**Main project**: gitlab.app:prismer/library (this repo is at `docker/agent/`)
+**License**: MIT
 
 ## Quick Start
 
@@ -19,7 +20,7 @@ npx tsc                  # Compile TypeScript
 npm test                 # Run all tests (vitest)
 
 # Run agent CLI
-node dist/cli.js chat --message "Hello"
+node dist/cli.js agent --message "Hello"
 node dist/cli.js serve --port 3001    # Start HTTP + WebSocket server
 ```
 
@@ -36,6 +37,7 @@ src/
 ├── prompt.ts         # Dynamic system prompt builder (SOUL.md / TOOLS.md / Skills)
 ├── cli.ts            # CLI entry point
 ├── sse.ts            # EventBus + SSE writer (Zod schemas)
+├── version.ts        # Centralized version string (single source of truth)
 ├── agents.ts         # Sub-agent registry (6 built-in agents)
 ├── skills.ts         # SKILL.md loader + YAML frontmatter
 ├── compaction.ts     # Context overflow → memory flush → LLM summarize
@@ -91,7 +93,7 @@ lumin-entrypoint.sh   # Container entrypoint (starts lumin serve + container gat
 
 ### Compaction
 When context exceeds `MAX_CONTEXT_CHARS` (default 600K), the compaction system:
-1. Flushes extractable facts to memory (`/workspace/.prismer/memory/YYYY-MM-DD.md`)
+1. Flushes extractable facts to memory (`{workspace}/.prismer/memory/YYYY-MM-DD.md`)
 2. LLM-summarizes the conversation
 3. Injects the summary as a compact message pair
 
@@ -120,9 +122,10 @@ ClawHub integration: `lumin skill install <url>` (pure JS git clone, no external
 | `OPENAI_API_KEY` | LLM provider API key | required |
 | `OPENAI_API_BASE_URL` | LLM provider base URL | `https://api.openai.com/v1` |
 | `AGENT_DEFAULT_MODEL` | Default model ID | `gpt-4o` |
+| `WORKSPACE_DIR` | Working directory | `./workspace` |
 | `LUMIN_PORT` | HTTP/WS server port | `3001` |
 | `MAX_CONTEXT_CHARS` | Compaction threshold | `600000` |
-| `PRISMER_PLUGIN_PATH` | Path to prismer-workspace plugin | — |
+| `PRISMER_PLUGIN_PATH` | Path to workspace plugin | — |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token (optional) | — |
 | `PRISMER_IM_BASE_URL` | Cloud IM base URL (optional) | — |
 | `PRISMER_IM_CONVERSATION_ID` | Cloud IM conversation (optional) | — |

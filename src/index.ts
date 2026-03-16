@@ -18,7 +18,7 @@ import { ConsoleObserver } from './observer.js';
 import { EventBus, StdoutSSEWriter } from './sse.js';
 import { SessionStore } from './session.js';
 import { writeOutput, type InputMessage } from './ipc.js';
-import { loadWorkspaceToolsFromPlugin, createTool, createClawHubTool, type WorkspacePluginConfig } from './tools/index.js';
+import { loadWorkspaceToolsFromPlugin, createTool, createClawHubTool, getBuiltinTools, type WorkspacePluginConfig } from './tools/index.js';
 import { PromptBuilder } from './prompt.js';
 import { SkillLoader } from './skills.js';
 import { MemoryStore } from './memory.js';
@@ -94,6 +94,12 @@ async function ensureInitialized(enabledModules?: string[]): Promise<{ tools: To
     if (generateWorkspaceMd) {
       sharedGenerateWorkspaceMd = generateWorkspaceMd;
     }
+
+    // Built-in tools — plugin tools with the same name take precedence
+    const pluginNames = new Set(workspaceTools.map(t => t.name));
+    const builtins = getBuiltinTools(pluginNames);
+    sharedTools.registerMany(builtins);
+    log.debug('built-in tools registered', { count: builtins.length, skipped: pluginNames.size > 0 ? [...pluginNames].filter(n => ['read_file', 'write_file', 'list_files', 'edit_file', 'grep', 'web_fetch', 'think'].includes(n)) : [] });
 
     // Bash — always available (sandboxed by container isolation)
     const workspaceDir = cfg.workspace.dir;
@@ -371,12 +377,14 @@ export { ToolRegistry } from './tools.js';
 export { EventBus, StdoutSSEWriter } from './sse.js';
 export { SessionStore } from './session.js';
 export { type InputMessage, type OutputMessage, writeOutput, parseOutput, OUTPUT_START, OUTPUT_END } from './ipc.js';
-export { loadWorkspaceToolsFromPlugin, createTool, createClawHubTool } from './tools/index.js';
+export { loadWorkspaceToolsFromPlugin, createTool, createClawHubTool, BUILTIN_TOOLS, getBuiltinTools } from './tools/index.js';
 export { PromptBuilder, type PromptSection } from './prompt.js';
 export { SkillLoader, type LoadedSkill, type SkillMeta } from './skills.js';
-export { MemoryStore } from './memory.js';
+export { MemoryStore, FileMemoryBackend } from './memory.js';
+export type { MemoryBackend, MemorySearchResult, MemoryCapabilities, MemorySearchOptions } from './memory.js';
 export { HookRegistry, type Hook, type HookType, type HookContext } from './hooks.js';
 export { ChannelManager } from './channels/manager.js';
 export type { ChannelAdapter, IncomingMessage as ChannelMessage } from './channels/types.js';
 export { loadConfig, resetConfig, LuminConfigSchema, type LuminConfig } from './config.js';
 export { createLogger, type Logger, type LogLevel } from './log.js';
+export { VERSION } from './version.js';

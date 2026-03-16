@@ -1,7 +1,7 @@
 {
   "name": "@prismer/agent-core",
-  "version": "0.3.0",
-  "description": "Lumin — lightweight agent runtime for academic research (4,665 LOC, replaces OpenClaw 892K LOC)",
+  "version": "0.3.1",
+  "description": "Lightweight TypeScript agent runtime. Zero heavy dependencies. OpenAI-compatible.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -13,6 +13,7 @@
     "./agent": { "types": "./dist/agent.d.ts", "default": "./dist/agent.js" },
     "./provider": { "types": "./dist/provider.d.ts", "default": "./dist/provider.js" },
     "./tools": { "types": "./dist/tools.d.ts", "default": "./dist/tools.js" },
+    "./tools/builtins": { "types": "./dist/tools/builtins.d.ts", "default": "./dist/tools/builtins.js" },
     "./session": { "types": "./dist/session.d.ts", "default": "./dist/session.js" },
     "./memory": { "types": "./dist/memory.d.ts", "default": "./dist/memory.js" },
     "./hooks": { "types": "./dist/hooks.d.ts", "default": "./dist/hooks.js" },
@@ -26,7 +27,8 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc",
@@ -52,6 +54,11 @@
     "url": "https://github.com/prismer/library",
     "directory": "docker/agent"
   },
-  "keywords": ["agent", "llm", "openai", "tool-calling", "academic", "runtime"],
+  "author": "Prismer.AI <dev@prismer.ai> (https://prismer.ai)",
+  "homepage": "https://github.com/prismer-ai/agent-core#readme",
+  "bugs": {
+    "url": "https://github.com/prismer-ai/agent-core/issues"
+  },
+  "keywords": ["agent", "llm", "openai", "tool-calling", "runtime", "ai-agent"],
   "license": "MIT"
 }

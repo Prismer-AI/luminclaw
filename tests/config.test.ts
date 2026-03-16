@@ -10,15 +10,15 @@ describe('LuminConfigSchema defaults', () => {
     const config = LuminConfigSchema.parse({});
     expect(config.port).toBe(3001);
     expect(config.host).toBe('0.0.0.0');
-    expect(config.llm.baseUrl).toBe('http://localhost:3000/v1');
-    expect(config.llm.model).toBe('us-kimi-k2.5');
+    expect(config.llm.baseUrl).toBe('https://api.openai.com/v1');
+    expect(config.llm.model).toBe('gpt-4o');
     expect(config.llm.maxTokens).toBe(8192);
     expect(config.agent.maxIterations).toBe(40);
     expect(config.agent.maxContextChars).toBe(600_000);
     expect(config.agent.doomLoopThreshold).toBe(3);
     expect(config.approval.timeoutMs).toBe(30_000);
     expect(config.approval.sensitiveTools).toEqual(['bash']);
-    expect(config.workspace.dir).toBe('/workspace');
+    expect(config.workspace.dir).toBe('./workspace');
     expect(config.session.maxIdleMs).toBe(30 * 60_000);
     expect(config.server.shutdownTimeoutMs).toBe(5_000);
     expect(config.eventBus.maxBuffer).toBe(1000);
@@ -35,7 +35,7 @@ describe('LuminConfigSchema defaults', () => {
     expect(config.port).toBe(8080);
     expect(config.llm.model).toBe('gpt-4o');
     expect(config.llm.maxTokens).toBe(4096);
-    expect(config.llm.baseUrl).toBe('http://localhost:3000/v1'); // default preserved
+    expect(config.llm.baseUrl).toBe('https://api.openai.com/v1'); // default preserved
     expect(config.agent.maxIterations).toBe(20);
     expect(config.agent.maxContextChars).toBe(600_000); // default preserved
   });
@@ -74,7 +74,7 @@ describe('loadConfig', () => {
   it('returns defaults when no env vars set', () => {
     const config = loadConfig();
     expect(config.port).toBe(3001);
-    expect(config.llm.model).toBe('us-kimi-k2.5');
+    expect(config.llm.model).toBe('gpt-4o');
   });
 
   it('reads LUMIN_PORT from env', () => {

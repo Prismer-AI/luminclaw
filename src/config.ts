@@ -12,7 +12,7 @@
  *
  * // Load from environment (zero-arg is the common case)
  * const cfg = loadConfig();
- * console.log(cfg.llm.model);       // 'us-kimi-k2.5'
+ * console.log(cfg.llm.model);       // 'gpt-4o'
  * console.log(cfg.agent.maxIterations); // 40
  *
  * // Override specific values
@@ -36,11 +36,11 @@ export const LuminConfigSchema = z.object({
   /** LLM provider settings. */
   llm: z.object({
     /** OpenAI-compatible API base URL. Env: `OPENAI_API_BASE_URL`. */
-    baseUrl: z.string().default('http://localhost:3000/v1'),
+    baseUrl: z.string().default('https://api.openai.com/v1'),
     /** API key for the LLM provider. Env: `OPENAI_API_KEY`. */
     apiKey: z.string().default(''),
     /** Default model identifier. Env: `AGENT_DEFAULT_MODEL`. */
-    model: z.string().default('us-kimi-k2.5'),
+    model: z.string().default('gpt-4o'),
     /** Fallback model chain (tried in order). Env: `MODEL_FALLBACK_CHAIN` (comma-separated). */
     fallbackModels: z.array(z.string()).default([]),
     /** Default max completion tokens. */
@@ -79,10 +79,10 @@ export const LuminConfigSchema = z.object({
 
   /** Workspace filesystem settings. */
   workspace: z.object({
-    /** Root working directory inside the container. Env: `WORKSPACE_DIR`. */
-    dir: z.string().default('/workspace'),
-    /** Path to the prismer-workspace plugin entry. Env: `PRISMER_PLUGIN_PATH`. */
-    pluginPath: z.string().default('/opt/prismer/plugins/prismer-workspace/dist/src/tools.js'),
+    /** Root working directory. Env: `WORKSPACE_DIR`. */
+    dir: z.string().default('./workspace'),
+    /** Path to the workspace plugin entry. Env: `PRISMER_PLUGIN_PATH`. */
+    pluginPath: z.string().default(''),
   }).default({}),
 
   /** Session management. */
@@ -117,6 +117,14 @@ export const LuminConfigSchema = z.object({
     level: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
     /** Debug namespace filter (e.g., `lumin:*`). Env: `DEBUG`. */
     debug: z.string().default(''),
+  }).default({}),
+
+  /** Memory backend settings. */
+  memory: z.object({
+    /** Backend type. Env: `MEMORY_BACKEND`. */
+    backend: z.enum(['file', 'cloud', 'vector']).default('file'),
+    /** Max chars for recent context in system prompt. */
+    recentContextMaxChars: z.number().default(3000),
   }).default({}),
 
   /** Prismer platform integration. */
@@ -185,6 +193,11 @@ function fromEnv(): Record<string, unknown> {
   if (env.LOG_LEVEL) log.level = env.LOG_LEVEL.toLowerCase();
   if (env.DEBUG) log.debug = env.DEBUG;
   if (Object.keys(log).length) raw.log = log;
+
+  // Memory
+  const memory: Record<string, unknown> = {};
+  if (env.MEMORY_BACKEND) memory.backend = env.MEMORY_BACKEND;
+  if (Object.keys(memory).length) raw.memory = memory;
 
   // Prismer
   const prismer: Record<string, unknown> = {};

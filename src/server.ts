@@ -33,6 +33,7 @@ import { runAgent } from './index.js';
 import { ChannelManager } from './channels/manager.js';
 import { loadConfig } from './config.js';
 import { createLogger } from './log.js';
+import { VERSION } from './version.js';
 
 const log = createLogger('server');
 
@@ -167,7 +168,7 @@ function json(res: ServerResponse, status: number, data: unknown): void {
 async function handleHealth(_req: IncomingMessage, res: ServerResponse): Promise<void> {
   json(res, 200, {
     status: 'ok',
-    version: '0.3.0',
+    version: VERSION,
     runtime: 'lumin',
     uptime: process.uptime(),
   });
@@ -179,9 +180,8 @@ async function handleTools(_req: IncomingMessage, res: ServerResponse): Promise<
   const { loadWorkspaceToolsFromPlugin, createTool } = await import('./tools/index.js');
 
   const tools = new ToolRegistry();
-  const pluginPath = process.env.PRISMER_PLUGIN_PATH
-    || '/opt/prismer/plugins/prismer-workspace/dist/src/tools.js';
-  const { tools: workspaceTools } = await loadWorkspaceToolsFromPlugin(pluginPath);
+  const cfg = loadConfig();
+  const { tools: workspaceTools } = await loadWorkspaceToolsFromPlugin(cfg.workspace.pluginPath);
   tools.registerMany(workspaceTools);
 
   // Include bash
@@ -413,7 +413,7 @@ function handleWebSocket(req: IncomingMessage, socket: import('node:net').Socket
   wsSend(socket, {
     type: 'connected',
     sessionId: client.sessionId,
-    version: '0.3.0',
+    version: VERSION,
     runtime: 'lumin',
   });
 }
@@ -517,7 +517,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       log.info('gateway started', { host, port, http: `http://${host}:${port}/health`, ws: `ws://${host}:${port}/v1/stream` });
       process.stderr.write(`
 ╔═══════════════════════════════════════════════╗
-║  Lumin v0.3.0 — Agent Gateway                ║
+║  Lumin v${VERSION} — Agent Gateway${' '.repeat(Math.max(0, 20 - VERSION.length))}║
 ╠═══════════════════════════════════════════════╣
 ║                                               ║
 ║  HTTP:  http://${host}:${port}/health${' '.repeat(Math.max(0, 25 - host.length - String(port).length))}║

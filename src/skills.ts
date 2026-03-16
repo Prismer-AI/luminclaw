@@ -36,10 +36,8 @@ export interface LoadedSkill {
 // ── Default Scan Directories ─────────────────────────────
 
 function getDefaultSkillDirs(): string[] {
-  const workspaceDir = process.env.WORKSPACE_DIR || '/workspace';
+  const workspaceDir = process.env.WORKSPACE_DIR || './workspace';
   return [
-    '/home/user/.openclaw/workspace/skills',  // User-installed skills
-    '/opt/prismer/config/skills',             // Container built-in skills
     `${workspaceDir}/skills`,                 // Workspace-local skills
   ];
 }

@@ -98,10 +98,15 @@ export function loadWorkspaceTools(
  * Returns empty result if plugin not available (graceful degradation).
  */
 export async function loadWorkspaceToolsFromPlugin(
-  pluginPath: string = '/opt/prismer/plugins/prismer-workspace/src/tools.js',
+  pluginPath: string = '',
   enabledModules?: string[],
   pluginConfig?: WorkspacePluginConfig,
 ): Promise<PluginLoadResult> {
+  if (!pluginPath) {
+    log.debug('no plugin path configured, skipping plugin load');
+    return { tools: [] };
+  }
+
   try {
     const mod = await import(pluginPath);
     const { toolDefinitions, executeTool, setConfig, generateWorkspaceMd } = mod;

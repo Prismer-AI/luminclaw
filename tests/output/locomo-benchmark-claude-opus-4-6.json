@@ -1,0 +1,558 @@
+{
+  "startTime": "2026-03-12T03:36:39.262Z",
+  "endTime": "2026-03-12T03:48:52.303Z",
+  "totalDurationMs": 733041,
+  "model": "claude-opus-4-6",
+  "sampleId": "conv-30",
+  "sessionCount": 19,
+  "turnCount": 369,
+  "totalChars": 43589,
+  "memoryStoreChars": 46501,
+  "qaEvaluated": 56,
+  "categoryScores": [
+    {
+      "category": 1,
+      "label": "Single-hop",
+      "total": 11,
+      "correct": 11,
+      "accuracy": 1
+    },
+    {
+      "category": 2,
+      "label": "Temporal",
+      "total": 15,
+      "correct": 14,
+      "accuracy": 0.9333333333333333
+    },
+    {
+      "category": 3,
+      "label": "Multi-hop",
+      "total": 0,
+      "correct": 0,
+      "accuracy": 0
+    },
+    {
+      "category": 4,
+      "label": "Open-domain",
+      "total": 15,
+      "correct": 14,
+      "accuracy": 0.9333333333333333
+    },
+    {
+      "category": 5,
+      "label": "Adversarial",
+      "total": 15,
+      "correct": 9,
+      "accuracy": 0.6
+    }
+  ],
+  "overallAccuracy": 0.8571428571428571,
+  "overallAccuracyNoAdversarial": 0.9512195121951219,
+  "qaResults": [
+    {
+      "question": "What do Jon and Gina both have in common?",
+      "category": 1,
+      "expectedAnswer": "They lost their jobs and decided to start their own businesses.",
+      "llmResponse": "Jon and Gina have several things in common:\n\n1. **Both lost their jobs** — Jon lost his job as a banker, and Gina lost her job at Door Dash.\n2. **Both started their own businesses** — Jon started a dance studio, and Gina started an online clothing store.\n3. **Both share a passion for dance**, partic",
+      "correct": true,
+      "memoryHits": 14,
+      "memoryBestScore": 0.75
+    },
+    {
+      "question": "What Jon thinks the ideal dance studio should look like?",
+      "category": 1,
+      "expectedAnswer": "By the water, with natural light and Marley flooring",
+      "llmResponse": "Based on the conversations, Jon's ideal dance studio should have:\n\n- **A location by the water** with an inspiring view\n- **Downtown location** for easy accessibility\n- **Great natural light**\n- **Adequate size** for him and his students\n- **Marley flooring** – grippy yet allows movement, durable, a",
+      "correct": true,
+      "memoryHits": 12,
+      "memoryBestScore": 1
+    },
+    {
+      "question": "Which city have both Jean and John visited?",
+      "category": 1,
+      "expectedAnswer": "Rome",
+      "llmResponse": "I don't have that information. The conversations don't mention anyone named Jean, and there's no discussion of cities that were visited.",
+      "correct": true,
+      "memoryHits": 4,
+      "memoryBestScore": 0.3333333333333333
+    },
+    {
+      "question": "Why did Gina decide to start her own clothing store?",
+      "category": 1,
+      "expectedAnswer": "She always loved fashion trends and finding unique pieces and she lost her job so decided it was time to start her own business.",
+      "llmResponse": "Gina decided to start her own online clothing store after losing her job at Door Dash. She wanted to take control of her own destiny, be her own boss, and do something she loved.",
+      "correct": true,
+      "memoryHits": 14,
+      "memoryBestScore": 1
+    },
+    {
+      "question": "Do Jon and Gina start businesses out of what they love?",
+      "category": 1,
+      "expectedAnswer": "Yes",
+      "llmResponse": "Yes. Jon starts a dance studio because dancing has been his passion since childhood, and Gina starts an online clothing store driven by her passion for fashion trends and finding unique pieces, also blending her love for dance and fashion. Both turn what they love into their businesses.",
+      "correct": true,
+      "memoryHits": 14,
+      "memoryBestScore": 1
+    },
+    {
+      "question": "How did Gina promote her clothes store?",
+      "category": 1,
+      "expectedAnswer": "worked with an artist to make unique fashion pieces, made limited-edition sweatshirts, got some new offers and promotions for online store, developed a video presentation showing how to style her pieces",
+      "llmResponse": "Gina launched an ad campaign for her clothing store in hopes of growing the business.",
+      "correct": true,
+      "memoryHits": 13,
+      "memoryBestScore": 1
+    },
+    {
+      "question": "Which events has Jon participated in to promote his business venture?",
+      "category": 1,
+      "expectedAnswer": "fair, networking events, dance competition",
+      "llmResponse": "Jon went to a **fair** to show off his dance studio, where he got some possible leads.",
+      "correct": true,
+      "memoryHits": 9,
+      "memoryBestScore": 0.6666666666666666
+    },
+    {
+      "question": "What does Jon's dance studio offer?",
+      "category": 1,
+      "expectedAnswer": "one-on-one metoring and training to dancers,  workshops and classes to local schools and centers",
+      "llmResponse": "Based on the conversations, Jon's dance studio offers **workshops and classes to local schools and centers**. He also hosts **dance competitions** to showcase local talent. His studio serves as a place where people can learn dance and express themselves through it.",
+      "correct": true,
+      "memoryHits": 4,
+      "memoryBestScore": 0.75
+    },
+    {
+      "question": "Did Jon and Gina both participate in dance competitions?",
+      "category": 1,
+      "expectedAnswer": "Yes",
+      "llmResponse": "Based on the conversations, only Gina is mentioned as having participated in dance competitions — she shared a photo of a trophy she won from a dance contest. There's no mention of Jon participating in dance competitions.",
+      "correct": true,
+      "memoryHits": 14,
+      "memoryBestScore": 1
+    },
+    {
+      "question": "Which cities has Jon visited?",
+      "category": 1,
+      "expectedAnswer": "Paris, Rome",
+      "llmResponse": "Based on the conversations, Jon has visited **Paris**.",
+      "correct": true,
+      "memoryHits": 17,
+      "memoryBestScore": 0.3333333333333333
+    },
+    {
+      "question": "How long did it take for Jon to open his studio?",
+      "category": 1,
+      "expectedAnswer": "six months",
+      "llmResponse": "Based on the conversations, I don't have enough specific information to determine exactly how long it took Jon to open his studio. The conversations span from January 20, 2023, onward, showing Jon losing his banking job and deciding to start a business, then later working toward opening a dance stud",
+      "correct": true,
+      "memoryHits": 12,
+      "memoryBestScore": 1
+    },
+    {
+      "question": "When Jon has lost his job as a banker?",
+      "category": 2,
+      "expectedAnswer": "19 January, 2023",
+      "llmResponse": "Jon lost his job as a banker the day before January 20, 2023 — so on **January 19, 2023**. He told Gina on January 20th that he \"lost my job as a banker yesterday.\"",
+      "correct": true,
+      "memoryHits": 20,
+      "memoryBestScore": 1
+    },
+    {
+      "question": "When Gina has lost her job at Door Dash?",
+      "category": 2,
+      "expectedAnswer": "January, 2023",
+      "llmResponse": "Gina mentioned she lost her job at Door Dash \"this month,\" and based on the conversation dated **January 20, 2023**, that would mean she lost her job sometime in **January 2023**. An exact date is not specified.",
+      "correct": true,
+      "memoryHits": 14,
+      "memoryBestScore": 1
+    },
+    {
+      "question": "When is Jon's group performing at a festival?",
+      "category": 2,
+      "expectedAnswer": "February, 2023",
+      "llmResponse": "Jon mentioned they were finishing up choreography to perform at a nearby festival **next month** (relative to their conversation on January 20, 2023). In a later conversation on February 8, 2023, Jon confirmed the festival performance had already taken place.",
+      "correct": true,
+      "memoryHits": 7,
+      "memoryBestScore": 0.75
+    },
+    {
+      "question": "When did Gina launch an ad campaign for her store?",
+      "category": 2,
+      "expectedAnswer": "29 January, 2023",
+      "llmResponse": "Gina mentioned launching an ad campaign for her clothing store on **January 29, 2023**.",
+      "correct": true,
+      "memoryHits": 11,
+      "memoryBestScore": 1
+    },
+    {
+      "question": "When was Jon in Paris?",
+      "category": 2,
+      "expectedAnswer": "28 January 2023",
+      "llmResponse": "Jon said he'd been to Paris \"yesterday.\" Based on the conversation flow, he mentioned this while discussing his dance studio search, but the exact date isn't explicitly stated for that specific message. The overall conversation started on **20 January, 2023**, so his Paris trip would have been aroun",
+      "correct": true,
+      "memoryHits": 16,
+      "memoryBestScore": 1
+    },
+    {
+      "question": "When did Gina team up with a local artist for some cool designs?",
+      "category": 2,
+      "expectedAnswer": "February, 2023",
+      "llmResponse": "I don't have that information. The conversations mention that Gina teamed up with a local artist for some cool designs, but no specific date or timeframe for when this collaboration happened is provided.",
+      "correct": true,
+      "memoryHits": 11,
+      "memoryBestScore": 1
+    },
+    {
+      "question": "When did Gina get her tattoo?",
+      "category": 2,
+      "expectedAnswer": "A few years ago",
+      "llmResponse": "Gina got her tattoo a few years ago (relative to the conversation). She said it stands for freedom — dancing without worrying what people think — and serves as a reminder to follow her passions and express herself.",
+      "correct": true,
+      "memoryHits": 12,
+      "memoryBestScore": 0.75
+    },
+    {
+      "question": "When did Jon start to go to the gym?",
+      "category": 2,
+      "expectedAnswer": "March, 2023",
+      "llmResponse": "Jon started hitting the gym in the week before March 16, 2023, as he mentioned on that date that he \"started hitting the gym last week.\"",
+      "correct": true,
+      "memoryHits": 14,
+      "memoryBestScore": 1
+    },
+    {
+      "question": "When did Gina open her online clothing store?",
+      "category": 2,
+      "expectedAnswer": "16 March, 2023",
+      "llmResponse": "Based on the conversations, the exact date isn't specified, but Gina opened her online clothing store sometime after losing her job at Door Dash. By **February 1, 2023**, she already had the store open and was expanding by contacting wholesalers. The store was opened before that date, shortly after ",
+      "correct": true,
+      "memoryHits": 14,
+      "memoryBestScore": 1
+    },
+    {
+      "question": "When did Jon start expanding his studio's social media presence?",
+      "category": 2,
+      "expectedAnswer": "April, 2023",
+      "llmResponse": "I don't have that information.",
+      "correct": true,
+      "memoryHits": 14,
+      "memoryBestScore": 0.6666666666666666
+    },
+    {
+      "question": "When did Jon host a dance competition?",
+      "category": 2,
+      "expectedAnswer": "May, 2023",
+      "llmResponse": "Jon mentioned he is **hosting a dance competition next month** (relative to when the conversation took place). The exact date isn't specified in the conversations.",
+      "correct": false,
+      "memoryHits": 14,
+      "memoryBestScore": 1
+    },
+    {
+      "question": "When did Jon go to a fair to get more exposure for his dance studio?",
+      "category": 2,
+      "expectedAnswer": "24 April, 2023",
+      "llmResponse": "I don't have that information.",
+      "correct": true,
+      "memoryHits": 13,
+      "memoryBestScore": 0.6666666666666666
+    },
+    {
+      "question": "When did Gina interview for a design internship?",
+      "category": 2,
+      "expectedAnswer": "10 May, 2023",
+      "llmResponse": "Based on the conversations, Gina mentioned \"I had an interview for a design internship **yesterday**\" but the exact date of that conversation isn't provided in the retrieved segments, so I can only say it was the day before she told Jon about it. The specific date is not available from the informati",
+      "correct": true,
+      "memoryHits": 12,
+      "memoryBestScore": 1
+    },
+    {
+      "question": "When did Gina get accepted for the design internship?",
+      "category": 2,
+      "expectedAnswer": "27 May, 2023",
+      "llmResponse": "I don't have that information.",
+      "correct": true,
+      "memoryHits": 12,
+      "memoryBestScore": 0.6666666666666666
+    },
+    {
+      "question": "When did Jon start reading \"The Lean Startup\"?",
+      "category": 2,
+      "expectedAnswer": "May, 2023",
+      "llmResponse": "I don't have that information. The conversations mention that Jon was reading \"The Lean Startup,\" but they don't specify exactly when he started reading it.",
+      "correct": true,
+      "memoryHits": 15,
+      "memoryBestScore": 1
+    },
+    {
+      "question": "How do Jon and Gina both like to destress?",
+      "category": 4,
+      "expectedAnswer": "by dancing",
+      "llmResponse": "Both Jon and Gina like to destress through **dancing**. Gina mentioned that dance is her \"go-to for stress relief,\" and Jon described dancing as his \"passion and escape\" since childhood.",
+      "correct": true,
+      "memoryHits": 14,
+      "memoryBestScore": 1
+    },
+    {
+      "question": "Why did Jon decide to start his dance studio?",
+      "category": 4,
+      "expectedAnswer": "He lost his job and decided to start his own business to share his passion.",
+      "llmResponse": "Jon decided to start his dance studio because he's been passionate about dancing since he was a kid—it's been his passion and escape—and he wanted to teach others the joy that dancing brings him. Losing his job as a banker also pushed him to take the plunge and pursue his business dreams.",
+      "correct": true,
+      "memoryHits": 12,
+      "memoryBestScore": 1
+    },
+    {
+      "question": "What is Gina's favorite style of dance?",
+      "category": 4,
+      "expectedAnswer": "Contemporary",
+      "llmResponse": "Gina's favorite style of dance is **contemporary**. She described it as \"so expressive and graceful\" and said it really speaks to her.",
+      "correct": true,
+      "memoryHits": 5,
+      "memoryBestScore": 0.5
+    },
+    {
+      "question": "What is Jon's favorite style of dance?",
+      "category": 4,
+      "expectedAnswer": "Contemporary",
+      "llmResponse": "Jon's favorite style of dance is **contemporary**. He describes it as \"so expressive and powerful.\"",
+      "correct": true,
+      "memoryHits": 5,
+      "memoryBestScore": 0.5
+    },
+    {
+      "question": "What was Gina's favorite dancing memory?",
+      "category": 4,
+      "expectedAnswer": "Winning first place at a regionals dance competition",
+      "llmResponse": "Gina's favorite dancing memory was when her team won first place at a regionals competition at age fifteen. They performed a contemporary piece called \"Finding Freedom,\" which she described as really emotional and powerful.",
+      "correct": true,
+      "memoryHits": 7,
+      "memoryBestScore": 0.5
+    },
+    {
+      "question": "What kind of dance piece did Gina's team perform to win first place?",
+      "category": 4,
+      "expectedAnswer": "\"Finding Freedom\"",
+      "llmResponse": "Gina's team performed a contemporary piece called \"Finding Freedom\" to win first place at regionals when she was fifteen.",
+      "correct": true,
+      "memoryHits": 3,
+      "memoryBestScore": 1
+    },
+    {
+      "question": "What do the dancers in the photo represent?",
+      "category": 4,
+      "expectedAnswer": "They are performing at the festival",
+      "llmResponse": "The dancers in the photo are Jon's small group of dancers who are performing at a nearby festival. Jon confirmed they are the ones performing at the festival, noting they've been practicing hard and will impress with their grace and skill.",
+      "correct": true,
+      "memoryHits": 5,
+      "memoryBestScore": 0.3333333333333333
+    },
+    {
+      "question": "What does Gina say about the dancers in the photo?",
+      "category": 4,
+      "expectedAnswer": "They look graceful",
+      "llmResponse": "Gina says \"They're so graceful!\" when asking Jon if the dancers in the photo are the ones performing at the festival.",
+      "correct": true,
+      "memoryHits": 10,
+      "memoryBestScore": 0.5
+    },
+    {
+      "question": "What is Jon's attitude towards being part of the dance festival?",
+      "category": 4,
+      "expectedAnswer": "Glad",
+      "llmResponse": "Jon is enthusiastic and positive about being part of the festival. He expresses excitement (\"Can't wait!\") and says \"Yeah, awesome! Glad to be part of it.\"",
+      "correct": true,
+      "memoryHits": 2,
+      "memoryBestScore": 0.6666666666666666
+    },
+    {
+      "question": "What kind of flooring is Jon looking for in his dance studio?",
+      "category": 4,
+      "expectedAnswer": "Marley flooring",
+      "llmResponse": "I don't have that information.",
+      "correct": true,
+      "memoryHits": 13,
+      "memoryBestScore": 1
+    },
+    {
+      "question": "What did Gina find for her clothing store on 1 February, 2023?",
+      "category": 4,
+      "expectedAnswer": "The perfect spot for her store",
+      "llmResponse": "On 1 February, 2023, Gina found a wholesaler who agreed to work with her (one replied and said yes to her email), allowing her to expand her clothing store. She also found a perfect spot/space for her store.",
+      "correct": true,
+      "memoryHits": 12,
+      "memoryBestScore": 1
+    },
+    {
+      "question": "What did Gina design for her store?",
+      "category": 4,
+      "expectedAnswer": "the space, furniture, and decor",
+      "llmResponse": "Gina designed the interior space of her clothing store, making it cozy and inviting for customers. She chose furniture that was both stylish and comfortable, and added a chandelier for a glam feel that matched the store's style. She also collaborated with a local artist on some cool designs for her ",
+      "correct": true,
+      "memoryHits": 10,
+      "memoryBestScore": 1
+    },
+    {
+      "question": "What did Gina want her customers to feel in her store?",
+      "category": 4,
+      "expectedAnswer": "cozy and comfortable",
+      "llmResponse": "Gina wanted her customers to feel **cozy, comfortable, and like they're in a cool oasis**. She aimed to create an inviting experience that would make them want to come back.",
+      "correct": true,
+      "memoryHits": 10,
+      "memoryBestScore": 1
+    },
+    {
+      "question": "What did Jon say about Gina's progress with her store?",
+      "category": 4,
+      "expectedAnswer": "hard work's paying off",
+      "llmResponse": "ERROR: Provider error 524: {\"error\":{\"message\":\"bad response status code 524 (request id: 20260312034505616528087BZGAZ7xe)\",\"type\":\"bad_response_status_code\",\"param\":\"\",\"code\":null}}",
+      "correct": false,
+      "memoryHits": 11,
+      "memoryBestScore": 0.6666666666666666
+    },
+    {
+      "question": "What made Gina choose the furniture and decor for her store?",
+      "category": 4,
+      "expectedAnswer": "personal style and customer comfort",
+      "llmResponse": "Gina chose furniture that looks great and is comfortable, wanting to reflect her own style and make customers feel cozy. She added a chandelier to give a nice glam feel while matching the style of the store.",
+      "correct": true,
+      "memoryHits": 12,
+      "memoryBestScore": 1
+    },
+    {
+      "question": "What temporary job did Jon take to cover expenses?",
+      "category": 5,
+      "expectedAnswer": "Not mentioned",
+      "llmResponse": "I don't have that information.",
+      "correct": true,
+      "memoryHits": 13,
+      "memoryBestScore": 0.6666666666666666
+    },
+    {
+      "question": "What is Jon's favorite style of painting?",
+      "category": 5,
+      "expectedAnswer": "Contemporary",
+      "llmResponse": "I don't have that information. The conversations mention Jon's favorite style of **dance** (contemporary), but there is no mention of painting.",
+      "correct": true,
+      "memoryHits": 4,
+      "memoryBestScore": 0.25
+    },
+    {
+      "question": "What was Jon's favorite dancing memory?",
+      "category": 5,
+      "expectedAnswer": "Winning first place at a regionals dance competition",
+      "llmResponse": "Jon's favorite dancing memory was when his dance crew took home first place in a local competition last year. He described it as amazing being up on that stage.",
+      "correct": false,
+      "memoryHits": 7,
+      "memoryBestScore": 0.5
+    },
+    {
+      "question": "What kind of dance piece did Jon's team perform to win first place?",
+      "category": 5,
+      "expectedAnswer": "\"Finding Freedom\"",
+      "llmResponse": "It was **Gina's** team, not Jon's, that performed a contemporary piece called **\"Finding Freedom\"** to win first place at regionals when she was fifteen.\n\nJon's dance crew won first place at a local competition, but the specific piece they performed was not mentioned.",
+      "correct": true,
+      "memoryHits": 3,
+      "memoryBestScore": 1
+    },
+    {
+      "question": "What is Gina's attitude towards participating in the dance festival?",
+      "category": 5,
+      "expectedAnswer": "Glad",
+      "llmResponse": "I don't have that information. The conversations show Gina commenting on the festival dancers (\"They're so graceful!\"), but she never expresses any attitude about personally participating in the dance festival.",
+      "correct": true,
+      "memoryHits": 11,
+      "memoryBestScore": 0.3333333333333333
+    },
+    {
+      "question": "What kind of flooring is Gina looking for in her dance studio?",
+      "category": 5,
+      "expectedAnswer": "Marley flooring",
+      "llmResponse": "Gina is not looking for flooring for a dance studio. It's **Jon** who is looking for a dance studio with a good dance floor that has enough bounce for him and his students to dance safely. Gina is running a clothing store, not a dance studio.",
+      "correct": false,
+      "memoryHits": 12,
+      "memoryBestScore": 1
+    },
+    {
+      "question": "What did Jon find for his clothing store on 1 February, 2023?",
+      "category": 5,
+      "expectedAnswer": "The perfect spot for her store",
+      "llmResponse": "I don't have that information. On 1 February, 2023, it was **Gina** (not Jon) who had news about her clothing store — she heard back from a wholesaler who agreed to work with her, allowing her to expand her clothing store. Jon does not have a clothing store; he is working on opening a dance studio.",
+      "correct": true,
+      "memoryHits": 15,
+      "memoryBestScore": 1
+    },
+    {
+      "question": "What did Jon design for his store?",
+      "category": 5,
+      "expectedAnswer": "the space, furniture, and decor",
+      "llmResponse": "I don't have that information. The conversations mention Jon having a dance studio, not a store, and there's no mention of Jon designing something for a store. It was **Gina** who designed the space for her clothing store, choosing furniture, decor, and a chandelier to create a cozy, inviting atmosp",
+      "correct": true,
+      "memoryHits": 12,
+      "memoryBestScore": 0.75
+    },
+    {
+      "question": "What did Jon want his customers to feel in her store?",
+      "category": 5,
+      "expectedAnswer": "cozy and comfortable",
+      "llmResponse": "It was **Gina**, not Jon, who wanted her customers to feel cozy, comfortable, and like they're in a \"cool oasis\" — creating an inviting experience that would make them want to come back.",
+      "correct": false,
+      "memoryHits": 10,
+      "memoryBestScore": 1
+    },
+    {
+      "question": "What made Jon choose the furniture and decor for his store?",
+      "category": 5,
+      "expectedAnswer": "personal style and customer comfort",
+      "llmResponse": "I don't have that information. In the conversations, it was **Gina**, not Jon, who discussed choosing furniture and decor for her store. She said she wanted the place to reflect her own style and make customers feel cozy, choosing furniture that looks great and is comfortable, with a chandelier to a",
+      "correct": true,
+      "memoryHits": 13,
+      "memoryBestScore": 0.7142857142857143
+    },
+    {
+      "question": "How is Jon's store doing?",
+      "category": 5,
+      "expectedAnswer": "The store is doing great.",
+      "llmResponse": "Jon doesn't have a store. He's working on opening a **dance studio**, not a store. Based on the conversations, he's been putting in a lot of work on his business despite obstacles and is determined to make it happen. He was still searching for a place to open his dance studio as of early February 20",
+      "correct": false,
+      "memoryHits": 8,
+      "memoryBestScore": 0.6666666666666666
+    },
+    {
+      "question": "What does Jon's tattoo symbolize?",
+      "category": 5,
+      "expectedAnswer": "Freedom and expressing himself through dance",
+      "llmResponse": "The tattoo isn't Jon's — it's Gina's. Her tattoo stands for freedom — dancing without worrying what people think, and serves as a reminder to follow her passions and express herself.",
+      "correct": false,
+      "memoryHits": 3,
+      "memoryBestScore": 0.3333333333333333
+    },
+    {
+      "question": "Why did Gina shut down her bank account?",
+      "category": 5,
+      "expectedAnswer": "for her business",
+      "llmResponse": "I don't have that information. The conversations mention that **Jon** shut down his bank account for his business, but there is no mention of Gina shutting down a bank account.",
+      "correct": true,
+      "memoryHits": 15,
+      "memoryBestScore": 1
+    },
+    {
+      "question": "Why did Jon combine his clothing business with dance?",
+      "category": 5,
+      "expectedAnswer": "he is passionate about dance and fashion",
+      "llmResponse": "I don't have that information. Based on the conversations, Jon doesn't have a clothing business. Jon is starting a **dance studio**, while **Gina** is the one with an online clothing store. It was **Gina** who combined fashion and dance, saying she's passionate about both and can add dance-inspired ",
+      "correct": true,
+      "memoryHits": 17,
+      "memoryBestScore": 1
+    },
+    {
+      "question": "What did Gina receive from a dance contest?",
+      "category": 5,
+      "expectedAnswer": "a trophy",
+      "llmResponse": "Gina received a trophy from a dance contest.",
+      "correct": false,
+      "memoryHits": 14,
+      "memoryBestScore": 0.75
+    }
+  ],
+  "chart": "\nLoCoMo Benchmark — Category Accuracy\n════════════════════════════════════════════════════════════\nSingle-hop   │█████████████████████████  100%  11/11\nTemporal     │███████████████████████░░   93%  14/15\nMulti-hop    │░░░░░░░░░░░░░░░░░░░░░░░░░    0%  0/0\nOpen-domain  │███████████████████████░░   93%  14/15\nAdversarial  │███████████████░░░░░░░░░░   60%  9/15\n════════════════════════════════════════════════════════════\nOverall:      86%  (48/56)\nNo adversar.: 95%  (39/41)\n────────────────────────────────────────────────────────────\nBaseline: Letta/MemGPT filesystem ≈ 74% on full LoCoMo\n"
+}
