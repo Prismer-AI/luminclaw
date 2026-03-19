@@ -1,0 +1,80 @@
+{
+  "timestamp": "2026-03-18T17:31:38.093Z",
+  "model": "us-kimi-k2.5",
+  "allResults": [
+    {
+      "runtime": "lumin-ts",
+      "passed": 3,
+      "total": 3,
+      "avgLatency": 7998,
+      "avgResponseLen": 356,
+      "results": [
+        {
+          "taskId": "T1-chat",
+          "elapsed": 7851.071999999999,
+          "responseLen": 781,
+          "thinkingLen": 240,
+          "tools": [],
+          "iterations": 1
+        },
+        {
+          "taskId": "T2-tool",
+          "elapsed": 4933.294290999998,
+          "responseLen": 33,
+          "thinkingLen": 127,
+          "tools": [
+            "bash"
+          ],
+          "iterations": 2
+        },
+        {
+          "taskId": "T3-multi",
+          "elapsed": 11210.214667,
+          "responseLen": 253,
+          "thinkingLen": 201,
+          "tools": [
+            "bash"
+          ],
+          "iterations": 2
+        }
+      ]
+    },
+    {
+      "runtime": "lumin-rust",
+      "passed": 3,
+      "total": 3,
+      "avgLatency": 9159,
+      "avgResponseLen": 232,
+      "results": [
+        {
+          "taskId": "T1-chat",
+          "elapsed": 13744.857208000001,
+          "responseLen": 501,
+          "thinkingLen": 1530,
+          "tools": [],
+          "iterations": 1
+        },
+        {
+          "taskId": "T2-tool",
+          "elapsed": 5017.664749999996,
+          "responseLen": 33,
+          "thinkingLen": 126,
+          "tools": [
+            "bash"
+          ],
+          "iterations": 2
+        },
+        {
+          "taskId": "T3-multi",
+          "elapsed": 8713.187082999997,
+          "responseLen": 163,
+          "thinkingLen": 154,
+          "tools": [
+            "bash"
+          ],
+          "iterations": 2
+        }
+      ]
+    }
+  ]
+}

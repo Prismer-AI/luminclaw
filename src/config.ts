@@ -63,6 +63,15 @@ export const LuminConfigSchema = z.object({
     repetitionThreshold: z.number().default(5),
     /** Agent template (`lite` loads fewer tools). Env: `AGENT_TEMPLATE`. */
     template: z.string().default('lite'),
+    /**
+     * Execution architecture. Env: `LUMIN_LOOP_MODE`.
+     * - `single`: synchronous single-loop (default, production-stable)
+     * - `dual`:   async dual-loop / HIL+EL (experimental, Phase 4)
+     *
+     * Per-container DB field overrides this value at request time via
+     * `resolveLoopMode()`. This config value is the server-wide default.
+     */
+    loopMode: z.enum(['single', 'dual']).default('single'),
   }).default({}),
 
   /** Approval gate for sensitive tools. */
@@ -166,6 +175,7 @@ function fromEnv(): Record<string, unknown> {
   const agent: Record<string, unknown> = {};
   if (env.MAX_CONTEXT_CHARS) agent.maxContextChars = parseInt(env.MAX_CONTEXT_CHARS, 10);
   if (env.AGENT_TEMPLATE) agent.template = env.AGENT_TEMPLATE;
+  if (env.LUMIN_LOOP_MODE === 'single' || env.LUMIN_LOOP_MODE === 'dual') agent.loopMode = env.LUMIN_LOOP_MODE;
   if (Object.keys(agent).length) raw.agent = agent;
 
   // Approval
@@ -245,6 +255,16 @@ export function loadConfig(overrides?: Record<string, unknown>): LuminConfig {
 
   const envValues = fromEnv();
   const merged = overrides ? deepMerge(envValues, overrides) : envValues;
+
+  // Zod v4 fix: `.default({})` on sub-objects sets the raw `{}` without
+  // re-parsing through the inner schema, so inner field defaults don't apply.
+  // Explicitly inserting `{}` for missing sub-objects makes Zod parse them
+  // through z.object({...}) which correctly applies inner field defaults.
+  const SUB_KEYS = ['llm', 'agent', 'approval', 'workspace', 'session', 'server', 'eventBus', 'log', 'prismer'];
+  for (const key of SUB_KEYS) {
+    if (!(key in merged)) merged[key] = {};
+  }
+
   const config = LuminConfigSchema.parse(merged);
 
   if (!overrides) {

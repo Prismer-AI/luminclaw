@@ -1,0 +1,22 @@
+[package]
+name = "lumin-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Lumin agent runtime core — Rust implementation"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+dashmap = { workspace = true }
+futures = { workspace = true }
+async-trait = "0.1"
+thiserror = "2"
+regex-lite = "0.1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

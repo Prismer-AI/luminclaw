@@ -303,7 +303,8 @@ export class OpenAICompatibleProvider implements Provider {
           name: buf.name,
           arguments: JSON.parse(buf.args || '{}'),
         });
-      } catch {
+      } catch (err) {
+        log.warn('tool call args parse failed, using empty object', { toolId: buf.id, toolName: buf.name, rawArgs: buf.args.slice(0, 200), error: err instanceof Error ? err.message : String(err) });
         toolCalls.push({ id: buf.id, name: buf.name, arguments: {} });
       }
     }
@@ -363,7 +364,8 @@ export class OpenAICompatibleProvider implements Provider {
             name: tc.function.name,
             arguments: JSON.parse(tc.function.arguments || '{}'),
           });
-        } catch {
+        } catch (err) {
+          log.warn('tool call args parse failed, using empty object', { toolId: tc.id, toolName: tc.function.name, rawArgs: (tc.function.arguments || '').slice(0, 200), error: err instanceof Error ? err.message : String(err) });
           toolCalls.push({ id: tc.id, name: tc.function.name, arguments: {} });
         }
       }
