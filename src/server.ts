@@ -181,7 +181,8 @@ async function handleTools(_req: IncomingMessage, res: ServerResponse): Promise<
 
   const tools = new ToolRegistry();
   const cfg = loadConfig();
-  const { tools: workspaceTools } = await loadWorkspaceToolsFromPlugin(cfg.workspace.pluginPath);
+  const enabledModules = cfg.modules.enabled.length > 0 ? cfg.modules.enabled : undefined;
+  const { tools: workspaceTools } = await loadWorkspaceToolsFromPlugin(cfg.workspace.pluginPath, enabledModules);
   tools.registerMany(workspaceTools);
 
   // Include bash
@@ -256,12 +257,23 @@ function handleWebSocket(req: IncomingMessage, socket: import('node:net').Socket
   };
 
   let recvBuffer = Buffer.alloc(0);
+  // Active chat abort controller — set when chat.send starts, aborted on chat.cancel or disconnect
+  let activeAbort: AbortController | null = null;
 
-  // Heartbeat
+  // Heartbeat — ping every 30s, but tolerate 2 missed pongs before disconnect.
+  // RawWebSocket (bridge client) sends masked pongs that may be lost in TCP buffers
+  // during heavy agent tool execution (large tool results saturate the write buffer).
+  let missedPongs = 0;
   const heartbeat = setInterval(() => {
     if (!client.alive) {
-      socket.destroy();
-      return;
+      missedPongs++;
+      if (missedPongs >= 3) {
+        // 3 consecutive missed pongs (~90s) — client truly gone
+        socket.destroy();
+        return;
+      }
+    } else {
+      missedPongs = 0;
     }
     client.alive = false;
     wsPing(socket);
@@ -270,16 +282,24 @@ function handleWebSocket(req: IncomingMessage, socket: import('node:net').Socket
   socket.on('data', async (data) => {
     recvBuffer = Buffer.concat([recvBuffer, data]);
 
-    // Handle pong (opcode 0x0A)
+    // Handle pong (opcode 0x0A) — client sends masked pong per RFC 6455
     if (recvBuffer.length >= 2 && (recvBuffer[0] & 0x0f) === 0x0a) {
       client.alive = true;
-      recvBuffer = recvBuffer.subarray(2);
+      // Masked pong: 2 header bytes + optional payload length + 4 mask key bytes + payload
+      const masked = (recvBuffer[1] & 0x80) !== 0;
+      const payloadLen = recvBuffer[1] & 0x7f;
+      const frameLen = 2 + (masked ? 4 : 0) + payloadLen;
+      if (recvBuffer.length >= frameLen) {
+        recvBuffer = recvBuffer.subarray(frameLen);
+      } else {
+        recvBuffer = Buffer.alloc(0);
+      }
       return;
     }
 
-    // Handle close (opcode 0x08)
+    // Handle close (opcode 0x08) — client may send masked close frame
     if (recvBuffer.length >= 2 && (recvBuffer[0] & 0x0f) === 0x08) {
-      // Send close back
+      // Send close back (unmasked, server→client)
       const closeFrame = Buffer.alloc(2);
       closeFrame[0] = 0x88;
       closeFrame[1] = 0;
@@ -317,6 +337,15 @@ function handleWebSocket(req: IncomingMessage, socket: import('node:net').Socket
       return;
     }
 
+    if (msg.type === 'chat.cancel') {
+      if (activeAbort) {
+        activeAbort.abort();
+        activeAbort = null;
+        wsSend(socket, { type: 'chat.cancelled', sessionId: client.sessionId });
+      }
+      return;
+    }
+
     if (msg.type !== 'chat.send') {
       wsSend(socket, { type: 'error', message: `Unknown type: ${msg.type}` });
       return;
@@ -331,6 +360,10 @@ function handleWebSocket(req: IncomingMessage, socket: import('node:net').Socket
     if (msg.sessionId) {
       client.sessionId = msg.sessionId;
     }
+
+    // Create abort controller for this chat turn
+    const abortController = new AbortController();
+    activeAbort = abortController;
 
     // Create event bus that forwards to WebSocket
     const bus = new EventBus();
@@ -375,7 +408,7 @@ function handleWebSocket(req: IncomingMessage, socket: import('node:net').Socket
       }
     });
 
-    // Run agent
+    // Run agent (with cancellation support)
     await runAgent(
       {
         type: 'message',
@@ -385,7 +418,9 @@ function handleWebSocket(req: IncomingMessage, socket: import('node:net').Socket
       },
       {
         bus,
+        signal: abortController.signal,
         onResult: (result, sessionId) => {
+          activeAbort = null;
           wsSend(socket, {
             type: 'chat.final',
             content: result.text,
@@ -403,10 +438,13 @@ function handleWebSocket(req: IncomingMessage, socket: import('node:net').Socket
 
   socket.on('close', () => {
     clearInterval(heartbeat);
+    // Abort any active agent run on disconnect
+    if (activeAbort) { activeAbort.abort(); activeAbort = null; }
   });
 
   socket.on('error', () => {
     clearInterval(heartbeat);
+    if (activeAbort) { activeAbort.abort(); activeAbort = null; }
   });
 
   // Welcome message

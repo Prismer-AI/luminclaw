@@ -67,8 +67,12 @@ async function ensureInitialized(enabledModules?: string[]): Promise<{ tools: To
     const pluginPath = cfg.workspace.pluginPath;
     const pluginConfig = buildPluginConfig();
 
-    // Auto-select modules based on AGENT_TEMPLATE if not explicitly specified
+    // Module gating: PRISMER_ENABLED_MODULES (from server) > explicit arg > AGENT_TEMPLATE fallback
     let modules = enabledModules;
+    if (!modules && cfg.modules.enabled.length > 0) {
+      modules = cfg.modules.enabled;
+      log.debug('module selection from env', { modules: modules.join(', ') });
+    }
     if (!modules) {
       const template = cfg.agent.template;
       if (template === 'lite') {
@@ -268,6 +272,8 @@ export interface RunAgentOptions {
   bus?: EventBus;
   /** Called when agent finishes (server mode sends result over WS instead of stdout). */
   onResult?: (result: AgentResult, sessionId: string) => void;
+  /** AbortSignal for cancellation (chat.cancel). Checked between iterations + tool calls. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -332,7 +338,7 @@ export async function runAgent(input: InputMessage, opts: RunAgentOptions = {}):
   });
 
   try {
-    const result = await agent.processMessage(input.content ?? '', session);
+    const result = await agent.processMessage(input.content ?? '', session, undefined, opts.signal);
 
     if (opts.onResult) {
       opts.onResult(result, sessionId);

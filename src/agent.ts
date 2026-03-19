@@ -240,7 +240,7 @@ export class PrismerAgent {
   }
 
   /** Main entry point — process a user message through the agent loop */
-  async processMessage(input: string, session: Session, memoryContext?: string): Promise<AgentResult> {
+  async processMessage(input: string, session: Session, memoryContext?: string, signal?: AbortSignal): Promise<AgentResult> {
     const startMs = Date.now();
 
     // Parse /think, /t, /nothink directives
@@ -294,6 +294,12 @@ export class PrismerAgent {
     const recentToolSigs: string[] = [];  // For repetition detection
 
     while (iteration++ < this.maxIterations) {
+      // ── Cancellation check ──
+      if (signal?.aborted) {
+        this.bus?.publish({ type: 'agent.end', data: { sessionId: session.id, toolsUsed } });
+        return this.buildResult(lastText || '[Cancelled]', lastThinking, session, toolsUsed, totalUsage, iteration);
+      }
+
       // ── Context window guard with auto-compaction ──
       const beforeCount = messages.length;
       const truncated = truncateOldestTurns(messages, MAX_CONTEXT_CHARS);

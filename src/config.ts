@@ -127,6 +127,12 @@ export const LuminConfigSchema = z.object({
     recentContextMaxChars: z.number().default(3000),
   }).default({}),
 
+  /** Tool module gating. */
+  modules: z.object({
+    /** Enabled tool module names. Env: `PRISMER_ENABLED_MODULES` (comma-separated). Empty = load all. */
+    enabled: z.array(z.string()).default([]),
+  }).default({}),
+
   /** Prismer platform integration. */
   prismer: z.object({
     /** Workspace API base URL. Env: `PRISMER_API_BASE_URL`. */
@@ -198,6 +204,11 @@ function fromEnv(): Record<string, unknown> {
   const memory: Record<string, unknown> = {};
   if (env.MEMORY_BACKEND) memory.backend = env.MEMORY_BACKEND;
   if (Object.keys(memory).length) raw.memory = memory;
+
+  // Modules
+  const modules: Record<string, unknown> = {};
+  if (env.PRISMER_ENABLED_MODULES) modules.enabled = env.PRISMER_ENABLED_MODULES.split(',').filter(Boolean);
+  if (Object.keys(modules).length) raw.modules = modules;
 
   // Prismer
   const prismer: Record<string, unknown> = {};

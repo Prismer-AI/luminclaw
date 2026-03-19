@@ -84,6 +84,12 @@ export const AgentEventSchema = z.discriminatedUnion('type', [
       reason: z.string().optional(),
     }),
   }),
+  z.object({
+    type: z.literal('chat.cancelled'),
+    data: z.object({
+      sessionId: z.string(),
+    }),
+  }),
 ]);
 
 /** A single agent event (inferred from {@link AgentEventSchema}). */
