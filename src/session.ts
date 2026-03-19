@@ -11,7 +11,8 @@
  * @module session
  */
 
-import type { Message } from './provider.js';
+import type { Message, ContentBlock } from './provider.js';
+import type { ImageRef } from './ipc.js';
 
 // ── Types ────────────────────────────────────────────────
 
@@ -54,6 +55,7 @@ export class Session {
     userInput: string,
     systemPrompt: string,
     memoryContext?: string,
+    images?: ImageRef[],
   ): Message[] {
     const msgs: Message[] = [];
 
@@ -73,8 +75,24 @@ export class Session {
     // Previous conversation history — with orphaned tool_call repair
     msgs.push(...repairOrphanedToolCalls(this.messages));
 
-    // Current user input
-    msgs.push({ role: 'user', content: userInput });
+    // Current user input — multimodal when images are present
+    if (images && images.length > 0) {
+      const contentBlocks: ContentBlock[] = [];
+      // Text first
+      if (userInput) {
+        contentBlocks.push({ type: 'text', text: userInput });
+      }
+      // Then images (OpenAI-compatible image_url format)
+      for (const img of images) {
+        contentBlocks.push({
+          type: 'image_url',
+          image_url: { url: img.url, detail: 'auto' },
+        });
+      }
+      msgs.push({ role: 'user', content: contentBlocks });
+    } else {
+      msgs.push({ role: 'user', content: userInput });
+    }
 
     return msgs;
   }

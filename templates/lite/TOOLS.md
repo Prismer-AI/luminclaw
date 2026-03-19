@@ -1,4 +1,4 @@
-# LuminPulse Lite — Available Tools
+# Lite Mode — Available Tools
 
 > **Mode:** Lite | **Plugin Version:** 0.10.0 | **Total Tools:** 23
 >

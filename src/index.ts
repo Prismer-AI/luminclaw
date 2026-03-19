@@ -338,7 +338,7 @@ export async function runAgent(input: InputMessage, opts: RunAgentOptions = {}):
   });
 
   try {
-    const result = await agent.processMessage(input.content ?? '', session, undefined, opts.signal);
+    const result = await agent.processMessage(input.content ?? '', session, undefined, input.images, opts.signal);
 
     if (opts.onResult) {
       opts.onResult(result, sessionId);
@@ -394,3 +394,11 @@ export type { ChannelAdapter, IncomingMessage as ChannelMessage } from './channe
 export { loadConfig, resetConfig, LuminConfigSchema, type LuminConfig } from './config.js';
 export { createLogger, type Logger, type LogLevel } from './log.js';
 export { VERSION } from './version.js';
+export { createAgentLoop, resolveLoopMode } from './loop/factory.js';
+export type { IAgentLoop, AgentLoopInput, AgentLoopResult, AgentLoopCallOpts, Artifact, ArtifactStore, LoopMode } from './loop/types.js';
+export { InMemoryArtifactStore } from './artifacts/memory.js';
+export { createArtifact, inferArtifactType } from './artifacts/types.js';
+export type { ArtifactInput, ArtifactType } from './artifacts/types.js';
+export { InMemoryTaskStore } from './task/store.js';
+export { TaskStateMachine, InvalidTransitionError } from './task/machine.js';
+export type { Task, TaskStatus, TaskStore, Checkpoint, CheckpointType } from './task/types.js';

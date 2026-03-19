@@ -20,10 +20,31 @@ const log = createLogger('provider');
 
 // ── Schemas ──────────────────────────────────────────────
 
+/**
+ * Content block for multimodal messages (OpenAI-compatible format).
+ * Used when a user message contains both text and images.
+ */
+export const ContentBlockSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('text'), text: z.string() }),
+  z.object({
+    type: z.literal('image_url'),
+    image_url: z.object({
+      url: z.string(),
+      detail: z.enum(['auto', 'low', 'high']).optional(),
+    }),
+  }),
+]);
+
+export type ContentBlock = z.infer<typeof ContentBlockSchema>;
+
 /** Zod schema for a single conversation message (system, user, assistant, or tool). */
 export const MessageSchema = z.object({
   role: z.enum(['system', 'user', 'assistant', 'tool']),
-  content: z.string().nullable(),
+  /** Text content (string) or multimodal content blocks (array) */
+  content: z.union([
+    z.string(),
+    z.array(ContentBlockSchema),
+  ]).nullable(),
   name: z.string().optional(),
   toolCallId: z.string().optional(),
   reasoningContent: z.string().optional(),
@@ -282,7 +303,8 @@ export class OpenAICompatibleProvider implements Provider {
           name: buf.name,
           arguments: JSON.parse(buf.args || '{}'),
         });
-      } catch {
+      } catch (err) {
+        log.warn('tool call args parse failed, using empty object', { toolId: buf.id, toolName: buf.name, rawArgs: buf.args.slice(0, 200), error: err instanceof Error ? err.message : String(err) });
         toolCalls.push({ id: buf.id, name: buf.name, arguments: {} });
       }
     }
@@ -342,7 +364,8 @@ export class OpenAICompatibleProvider implements Provider {
             name: tc.function.name,
             arguments: JSON.parse(tc.function.arguments || '{}'),
           });
-        } catch {
+        } catch (err) {
+          log.warn('tool call args parse failed, using empty object', { toolId: tc.id, toolName: tc.function.name, rawArgs: (tc.function.arguments || '').slice(0, 200), error: err instanceof Error ? err.message : String(err) });
           toolCalls.push({ id: tc.id, name: tc.function.name, arguments: {} });
         }
       }

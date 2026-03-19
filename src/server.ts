@@ -29,13 +29,27 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
 import { EventBus, type AgentEvent } from './sse.js';
-import { runAgent } from './index.js';
 import { ChannelManager } from './channels/manager.js';
 import { loadConfig } from './config.js';
 import { createLogger } from './log.js';
 import { VERSION } from './version.js';
+import { createAgentLoop, resolveLoopMode } from './loop/factory.js';
+import type { IAgentLoop } from './loop/types.js';
 
 const log = createLogger('server');
+
+// ── Shared loop instance (initialized in startServer) ────
+// Using a module-level variable so handlers defined as standalone functions
+// can access it via closure — same pattern as `runAgent` was previously used.
+let sharedLoop: IAgentLoop | null = null;
+
+function getLoop(): IAgentLoop {
+  if (!sharedLoop) {
+    // Fallback: create on demand if startServer hasn't run (e.g. tests).
+    sharedLoop = createAgentLoop();
+  }
+  return sharedLoop;
+}
 
 // ── Types ────────────────────────────────────────────────
 
@@ -145,10 +159,18 @@ function wsPing(socket: import('node:net').Socket): void {
 
 // ── HTTP Request Handlers ────────────────────────────────
 
+const MAX_BODY_BYTES = 10_000_000; // 10 MB
+
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     let data = '';
-    req.on('data', (chunk) => { data += chunk; });
+    req.on('data', (chunk) => {
+      data += chunk;
+      if (data.length > MAX_BODY_BYTES) {
+        req.destroy();
+        reject(new Error(`Body exceeds ${MAX_BODY_BYTES} bytes`));
+      }
+    });
     req.on('end', () => resolve(data));
     req.on('error', reject);
     setTimeout(() => reject(new Error('Body read timeout')), 30_000);
@@ -166,11 +188,26 @@ function json(res: ServerResponse, status: number, data: unknown): void {
 }
 
 async function handleHealth(_req: IncomingMessage, res: ServerResponse): Promise<void> {
-  json(res, 200, {
-    status: 'ok',
+  const cfg = loadConfig();
+  const checks: Record<string, string> = {};
+
+  if (!cfg.llm.apiKey) checks.apiKey = 'missing';
+
+  let pluginOk = false;
+  try {
+    const { existsSync } = await import('node:fs');
+    pluginOk = existsSync(cfg.workspace.pluginPath);
+  } catch { /* */ }
+  if (!pluginOk) checks.plugin = `not found: ${cfg.workspace.pluginPath}`;
+
+  const healthy = Object.keys(checks).length === 0;
+  json(res, healthy ? 200 : 503, {
+    status: healthy ? 'ok' : 'degraded',
     version: VERSION,
     runtime: 'lumin',
+    loopMode: resolveLoopMode(),
     uptime: process.uptime(),
+    ...(healthy ? {} : { checks }),
   });
 }
 
@@ -216,30 +253,58 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
   const events: AgentEvent[] = [];
   bus.subscribe((event) => events.push(event));
 
-  await runAgent(
+  const result = await getLoop().processMessage(
     {
-      type: 'message',
       content: payload.content,
       sessionId: payload.sessionId,
       config: payload.config as Record<string, string | number | string[] | undefined> | undefined,
     },
-    {
-      bus,
-      onResult: (result, sessionId) => {
-        json(res, 200, {
-          status: 'success',
-          response: result.text,
-          thinking: result.thinking,
-          directives: result.directives,
-          toolsUsed: result.toolsUsed,
-          usage: result.usage,
-          sessionId,
-          iterations: result.iterations,
-          events: events.length,
-        });
-      },
-    },
+    { bus },
   );
+
+  json(res, 200, {
+    status: 'success',
+    response: result.text,
+    thinking: result.thinking,
+    directives: result.directives,
+    toolsUsed: result.toolsUsed,
+    usage: result.usage,
+    sessionId: result.sessionId,
+    iterations: result.iterations,
+    events: events.length,
+  });
+}
+
+async function handleArtifacts(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  let body: string;
+  try {
+    body = await readBody(req);
+  } catch {
+    json(res, 400, { error: 'Failed to read request body' });
+    return;
+  }
+
+  let payload: { url: string; mimeType: string; type?: string };
+  try {
+    payload = JSON.parse(body);
+    if (!payload.url || !payload.mimeType) throw new Error('url and mimeType are required');
+  } catch (err) {
+    json(res, 400, { error: `Invalid JSON: ${err instanceof Error ? err.message : String(err)}` });
+    return;
+  }
+
+  const loop = getLoop();
+  // Access the artifact store through the loop's addArtifact
+  const { createArtifact } = await import('./artifacts/types.js');
+  const artifact = createArtifact({
+    url: payload.url,
+    mimeType: payload.mimeType,
+    type: (payload.type as 'image' | 'file' | 'url') ?? undefined,
+    addedBy: 'user',
+  });
+  loop.addArtifact(artifact);
+
+  json(res, 200, { artifactId: artifact.id, type: artifact.type, mimeType: artifact.mimeType });
 }
 
 // ── WebSocket Handler ────────────────────────────────────
@@ -312,7 +377,7 @@ function handleWebSocket(req: IncomingMessage, socket: import('node:net').Socket
     if (!decoded) return;
     recvBuffer = recvBuffer.subarray(decoded.consumed);
 
-    let msg: { type: string; content?: string; sessionId?: string; config?: Record<string, unknown> };
+    let msg: { type: string; content?: string; sessionId?: string; config?: Record<string, unknown>; images?: Array<{ url: string; path?: string; mimeType?: string }> };
     try {
       msg = JSON.parse(decoded.text);
     } catch {
@@ -408,32 +473,28 @@ function handleWebSocket(req: IncomingMessage, socket: import('node:net').Socket
       }
     });
 
-    // Run agent (with cancellation support)
-    await runAgent(
+    // Run agent (with cancellation support + optional images for multimodal vision)
+    const result = await getLoop().processMessage(
       {
-        type: 'message',
         content: msg.content,
+        images: msg.images,
         sessionId: client.sessionId,
         config: msg.config as Record<string, string | number | string[] | undefined> | undefined,
       },
-      {
-        bus,
-        signal: abortController.signal,
-        onResult: (result, sessionId) => {
-          activeAbort = null;
-          wsSend(socket, {
-            type: 'chat.final',
-            content: result.text,
-            thinking: result.thinking,
-            directives: result.directives,
-            toolsUsed: result.toolsUsed,
-            usage: result.usage,
-            sessionId,
-            iterations: result.iterations,
-          });
-        },
-      },
+      { bus, signal: abortController.signal },
     );
+
+    activeAbort = null;
+    wsSend(socket, {
+      type: 'chat.final',
+      content: result.text,
+      thinking: result.thinking,
+      directives: result.directives,
+      toolsUsed: result.toolsUsed,
+      usage: result.usage,
+      sessionId: result.sessionId,
+      iterations: result.iterations,
+    });
   });
 
   socket.on('close', () => {
@@ -469,6 +530,12 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   const port = opts.port ?? serverCfg.port;
   const host = opts.host ?? serverCfg.host;
 
+  // Initialise the shared agent loop once per server process.
+  // Single-loop mode: stateless, safe to share across concurrent requests.
+  // Dual-loop mode (Phase 4): DualLoopAgent will manage per-task state internally.
+  sharedLoop = createAgentLoop(serverCfg.agent.loopMode);
+  log.info('agent loop initialised', { mode: sharedLoop.mode });
+
   const server = createServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
     const path = url.pathname;
@@ -493,6 +560,8 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         await handleTools(req, res);
       } else if (path === '/v1/chat' && method === 'POST') {
         await handleChat(req, res);
+      } else if (path === '/v1/artifacts' && method === 'POST') {
+        await handleArtifacts(req, res);
       } else {
         json(res, 404, { error: 'Not found' });
       }
@@ -517,18 +586,15 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   // ── Channel Manager — discover and start messaging channels ──
   const channelManager = new ChannelManager();
   channelManager.setHandler(async (msg) => {
-    return new Promise((resolve) => {
-      const bus = new EventBus();
-      runAgent(
-        { type: 'message', content: msg.text, sessionId: `${msg.chatId}-channel` },
-        {
-          bus,
-          onResult: (result) => resolve(result.text || '(no response)'),
-        },
-      ).catch((err) => {
-        resolve(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    try {
+      const result = await getLoop().processMessage({
+        content: msg.text,
+        sessionId: `${msg.chatId}-channel`,
       });
-    });
+      return result.text || '(no response)';
+    } catch (err) {
+      return `Error: ${err instanceof Error ? err.message : String(err)}`;
+    }
   });
   // Start channels (non-blocking)
   channelManager.startAll().catch((err) => {
@@ -540,6 +606,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   const shutdown = () => {
     log.info('shutting down');
     channelManager.stopAll().catch(() => {});
+    sharedLoop?.shutdown().catch(() => {});
     server.close(() => {
       log.info('goodbye');
       process.exit(0);
@@ -549,6 +616,13 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
 
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
+  process.on('unhandledRejection', (err) => {
+    log.error('unhandled promise rejection', { error: err instanceof Error ? err.message : String(err), stack: err instanceof Error ? err.stack : undefined });
+  });
+  process.on('uncaughtException', (err) => {
+    log.error('uncaught exception, shutting down', { error: err.message, stack: err.stack });
+    shutdown();
+  });
 
   return new Promise((resolve) => {
     server.listen(port, host, () => {

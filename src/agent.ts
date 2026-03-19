@@ -194,6 +194,7 @@ export class PrismerAgent {
       setTimeout(() => {
         if (this.approvalResolvers.has(toolId)) {
           this.approvalResolvers.delete(toolId);
+          log.warn('approval timed out, rejecting', { toolId, timeoutMs: APPROVAL_TIMEOUT_MS });
           resolve(false); // Timeout → reject (safe default)
         }
       }, APPROVAL_TIMEOUT_MS);
@@ -240,7 +241,7 @@ export class PrismerAgent {
   }
 
   /** Main entry point — process a user message through the agent loop */
-  async processMessage(input: string, session: Session, memoryContext?: string, signal?: AbortSignal): Promise<AgentResult> {
+  async processMessage(input: string, session: Session, memoryContext?: string, images?: import('./ipc.js').ImageRef[], signal?: AbortSignal): Promise<AgentResult> {
     const startMs = Date.now();
 
     // Parse /think, /t, /nothink directives
@@ -272,8 +273,8 @@ export class PrismerAgent {
       return result;
     }
 
-    // Build messages with system prompt + memory + history
-    const messages = session.buildMessages(cleanInput, this.systemPrompt, memoryContext);
+    // Build messages with system prompt + memory + history + optional images
+    const messages = session.buildMessages(cleanInput, this.systemPrompt, memoryContext, images);
 
     // Get tool specs (filter by agent config if sub-agent)
     const agentConfig = this.agents.get(this.agentId);
@@ -310,7 +311,7 @@ export class PrismerAgent {
           try {
             // Flush important facts to memory before compaction
             if (this.memoryStore) {
-              try { await memoryFlushBeforeCompaction(this.provider, dropped, this.memoryStore, this.model); } catch { /* non-fatal */ }
+              try { await memoryFlushBeforeCompaction(this.provider, dropped, this.memoryStore, this.model); } catch (err) { log.warn('memory flush failed (non-fatal)', { error: err instanceof Error ? err.message : String(err) }); }
             }
             const result = await compactConversation(this.provider, dropped, this.model);
             session.compactionSummary = result.summary;
@@ -320,7 +321,7 @@ export class PrismerAgent {
               data: { droppedCount: result.droppedCount, summaryChars: result.summaryChars },
             });
             this.bus?.publish({ type: 'compaction', data: { summary: result.summary.slice(0, 200), droppedCount: result.droppedCount } });
-          } catch { /* compaction failure is non-fatal */ }
+          } catch (err) { log.warn('compaction failed (non-fatal)', { error: err instanceof Error ? err.message : String(err), droppedCount: dropped.length }); }
         }
         messages.length = 0;
         messages.push(...repairOrphanedToolResults(truncated));
@@ -330,7 +331,7 @@ export class PrismerAgent {
       if (this.hooks && iteration === 1) {
         const sysIdx = messages.findIndex(m => m.role === 'system');
         if (sysIdx >= 0 && messages[sysIdx].content) {
-          messages[sysIdx].content = await this.hooks.runBeforePrompt(hookCtx, messages[sysIdx].content!);
+          messages[sysIdx].content = await this.hooks.runBeforePrompt(hookCtx, messages[sysIdx].content as string);
         }
       }
 
