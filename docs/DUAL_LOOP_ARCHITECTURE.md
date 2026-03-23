@@ -3,10 +3,10 @@
 ## Lumin — Runtime Mode Switching: Single-Loop / Dual-Loop
 
 > **Status**: Implemented (TS + Rust), validated with real LLM
-> **Runtimes**: TypeScript (primary), Rust (feature-parity)
+> **Runtimes**: TypeScript (primary), Rust (core-parity — see §10 for divergences)
 > **Mode**: `LUMIN_LOOP_MODE=single` (default) | `dual`
-> **Tests**: TS 521, Rust 491, Sync Parity 11, Stress 8×2
-> **Rev**: 4 — Updated to reflect implemented state (2026-03-23)
+> **Tests**: TS 521, Rust 491, total 1,012 + stress 16
+> **Rev**: 5 — Incorporates architecture review feedback (2026-03-23)
 
 ---
 
@@ -57,16 +57,15 @@ Both modes conform to the same `IAgentLoop` interface. Server code (`server.ts` 
 | HTTP `/v1/chat` (single + dual mode) | ✓ | ✓ | Same JSON schema (camelCase) |
 | WebSocket `/v1/stream` | ✓ | ✓ | Same event protocol |
 | `chat.final` emission from dual-loop | ✓ | ✓ | Background → EventBus → client |
+| Approval gates (sensitive tool confirmation) | ✓ | — | TS only |
 
 ### What's Not Yet Implemented
 
 | Feature | Notes |
 |---------|-------|
-| Mid-execution pause/resume (clarification gates) | Architecture exists, not functional |
-| WorldModel persistence across tasks | Fresh per task, discarded on completion |
+| Mid-execution pause/resume (clarification gates) | State machine supports it, not wired |
 | Sub-agent delegation (`spawn_agent`, `@mention`) | TS has `@mention` in single-loop only |
-| Approval gates (sensitive tool confirmation) | TS only, not in Rust |
-| Cancellation (`AbortSignal`) | TS has basic cancel, Rust has `cancelled` flag |
+| Cancellation (`AbortSignal`) | TS has basic cancel, Rust has `cancelled` flag — see §4.3 |
 | Multimodal content (`ContentBlock[]`) | TS only, Rust uses `Option<String>` |
 | Thinking level control (`thinkingLevel`) | TS only |
 | Channel adapters (Telegram, CloudIM) | TS implemented, Rust stubs |
@@ -106,6 +105,8 @@ pending → failed (direct)
 
 All transitions validated by `TaskStateMachine`. Invalid transitions throw.
 
+> **Note**: `planning` is a reserved state for a future lightweight planning LLM call before execution dispatch. Current implementation transitions directly from `pending` to `executing`.
+
 ### 3.3 Artifact Store
 
 ```typescript
@@ -138,7 +139,7 @@ interface WorldModel {
 }
 ```
 
-`buildHandoffContext(model, targetAgentId)` produces a compact ≤ 3,000 char string injected into the inner loop's system prompt.
+`buildHandoffContext(model, targetAgentId)` produces a compact string injected into the inner loop's system prompt. Budget default is 3,000 chars (~750 tokens) — sized to leave >99% of the context window for the sub-agent's actual work. Configurable via `HANDOFF_BUDGET` constant.
 
 `extractStructuredFacts(text, agentId)` extracts file paths (`/workspace/...`) and measurements (`42 citations`, `3 figures`) via regex — zero LLM cost.
 
@@ -161,12 +162,14 @@ POST /v1/chat { content, sessionId }
               ├── LLM call (streaming via EventBus)
               ├── if no tool_calls → break, return text
               └── execute tools → push results to session
-                    ├── doom-loop detection (3 consecutive errors)
-                    ├── repetition detection (5 identical calls)
+                    ├── doom-loop detection (configurable, default: 3 consecutive errors)
+                    ├── repetition detection (configurable, default: 5 identical calls)
                     └── tool result compaction (>140K truncated)
   │
   └── Return { status, response, toolsUsed, sessionId, iterations }
 ```
+
+Doom-loop and repetition thresholds are configurable via `AgentOptions` (`doomLoopThreshold`, `repetitionThreshold`). Defaults are empirical values that balance between premature termination and runaway loops.
 
 ### 4.2 Dual-Loop
 
@@ -178,7 +181,7 @@ POST /v1/chat { content, sessionId }
   ├── Create WorldModel for task
   ├── Publish agent.start event
   │
-  ├── Return immediately: "Task {id} created and executing."
+  ├── Return immediately: { status: "success", response: "Task {id} created...", taskId: "{id}" }
   │
   └── Background (tokio::spawn / fire-and-forget):
         ├── Build system prompt with handoff context
@@ -187,11 +190,35 @@ POST /v1/chat { content, sessionId }
         ├── On success:
         │     ├── Complete task (status → completed)
         │     ├── Publish task.completed event
-        │     └── Publish chat.final event (content, toolsUsed)
+        │     └── Publish chat.final event (content, toolsUsed, taskId)
         └── On error:
               ├── Fail task (status → failed)
               └── Publish error event
 ```
+
+**Client-side integration for dual-loop:**
+
+The caller should not rely on the HTTP response text for the task result. Instead:
+1. Read `taskId` from the immediate HTTP response
+2. Listen for `chat.final` or `task.completed` event on WebSocket with matching `taskId`
+3. If the WebSocket disconnects and reconnects, the client should query task status via `/health` or a future `/v1/tasks/:id` endpoint
+
+> **Known limitation**: There is currently no persistent event replay or task result polling endpoint. If the client is disconnected when `chat.final` fires, the result is lost. See §13 Known Limitations.
+
+### 4.3 Cancellation
+
+```
+Client calls cancel() / sends chat.cancel WS message
+  │
+  ├── TS: AbortSignal triggers at next iteration boundary (before LLM call)
+  │     → agent returns '[Cancelled]', bus emits chat.cancelled
+  │
+  └── Rust: cancelled Mutex flag set to true
+        → DualLoopAgent.cancel() also transitions active task → failed
+        → Inner loop does NOT currently check the flag mid-execution
+```
+
+> **Gap**: Rust inner loop does not poll the `cancelled` flag between iterations. A long-running Rust dual-loop task cannot be interrupted until the current LLM call + tool execution completes.
 
 ---
 
@@ -203,22 +230,37 @@ POST /v1/chat { content, sessionId }
 { "content": "string", "sessionId": "string?" }
 ```
 
-Rust accepts both `sessionId` and `session_id` (alias).
+> **Alias deprecation**: Rust currently accepts both `sessionId` (canonical) and `session_id` (legacy alias). The `session_id` alias will be removed in a future version. Clients should use `sessionId`.
 
 ### POST /v1/chat Response
 
+**Single-loop mode:**
 ```json
 {
   "status": "success",
-  "response": "string",
+  "response": "The answer is 42.",
   "thinking": "string?",
-  "sessionId": "string",
+  "sessionId": "session-abc",
   "toolsUsed": ["bash", "memory_recall"],
   "iterations": 3,
   "durationMs": 4521,
   "usage": { "promptTokens": 1200, "completionTokens": 350 }
 }
 ```
+
+**Dual-loop mode** (same endpoint, different semantics):
+```json
+{
+  "status": "success",
+  "response": "Task a1b2c3 created and executing.",
+  "sessionId": "session-abc",
+  "toolsUsed": [],
+  "iterations": 0,
+  "durationMs": 8
+}
+```
+
+Callers can distinguish modes by: `iterations === 0` and `response` contains "Task". A future version will add an explicit `taskId` field and `mode` field to the response.
 
 ### GET /health Response
 
@@ -272,8 +314,6 @@ Server → { type: "chat.final", content, thinking, toolsUsed, sessionId }
 
 ## 7. Session Persistence
 
-**Key design decision** (fixed during implementation):
-
 User input is persisted to `session.messages` **before** calling `buildMessages()`. This ensures multi-turn conversations work correctly — the LLM sees all prior user messages and assistant responses when building the next response.
 
 ```
@@ -285,7 +325,7 @@ Request 2: "What was the code?"
   → LLM sees full history → recalls FALCON99
 ```
 
-Previously, user input was only added to the temporary `messages` array for the LLM call but not persisted to `session.messages`, causing recall failure.
+Previously, user input was only added to the temporary `messages` array for the LLM call but not persisted to `session.messages`, causing recall failure across requests.
 
 ---
 
@@ -315,12 +355,14 @@ Tracks component ownership across multi-agent delegation. Push on delegate, pop 
 
 | ID | Mode | Tools | Purpose |
 |----|------|-------|---------|
-| `researcher` | Primary | all | Orchestrate, delegate to sub-agents |
+| `researcher` | Primary | `null` (no filter — all registered tools available) | Orchestrate, delegate to sub-agents |
 | `latex-expert` | Subagent | latex_compile, latex_project, switch_component, update_content, bash | LaTeX writing/compilation |
 | `data-analyst` | Subagent | jupyter_execute, jupyter_notebook, switch_component, update_content, bash | Data analysis |
 | `literature-scout` | Subagent | arxiv_search, load_pdf, context_search, switch_component, bash | Paper discovery |
-| `compaction` | Hidden | — | Conversation summarization |
-| `summarizer` | Hidden | — | Title generation |
+| `compaction` | Hidden | `[]` (no tools) | Conversation summarization |
+| `summarizer` | Hidden | `[]` (no tools) | Title generation |
+
+`tools: null` means no tool filtering — the agent sees all tools registered in the `ToolRegistry`. `tools: [...]` restricts to the listed names via `getSpecs(allowedTools)`.
 
 ---
 
@@ -344,14 +386,20 @@ Both TS and Rust servers are started, identical requests are sent, structural eq
 | P10 | Errors: both handle empty content gracefully |
 | P11 | Concurrency: both handle 3 parallel requests |
 
-### Known Divergences (Rust not yet implemented)
+### Rust Divergences
 
-- No `DirectiveRouter` or `AgentViewStack` (TS only)
-- No approval gates or `@mention` delegation
-- No multimodal content (`ContentBlock[]`)
-- No `thinkingLevel` / `temperature` in ChatRequest
-- No channel adapters (Telegram, CloudIM)
-- Config has fewer sections (no `approval`, `session`, `server`, `memory` sub-configs)
+Rust implements **core agent loop parity** (single-loop, dual-loop, tools, sessions, memory, config, provider with fallback). The following TS-only capabilities are **not** in Rust:
+
+| Missing in Rust | Impact |
+|-----------------|--------|
+| `DirectiveRouter`, `AgentViewStack` | No directive routing by delivery mode |
+| Approval gates (`needsApproval`, `waitForApproval`) | **Security: sensitive tools execute without confirmation** |
+| `@mention` delegation, `delegate` tool | No sub-agent orchestration |
+| Multimodal `ContentBlock[]` in Message | Image/file content blocks silently downgraded to empty string |
+| `thinkingLevel` / `temperature` control | No per-request LLM parameter tuning |
+| Channel adapters (Telegram, CloudIM) | No messaging platform integration |
+
+> **Security warning**: Rust runtime should not be used for untrusted tool execution in dual-loop mode until approval gates are implemented. In dual-loop mode, the inner loop executes tools autonomously without human confirmation.
 
 ---
 
@@ -359,15 +407,14 @@ Both TS and Rust servers are started, identical requests are sent, structural eq
 
 See [docs/TEST_COVERAGE.md](./TEST_COVERAGE.md) for full breakdown.
 
-| Metric | Value |
-|--------|-------|
+| Metric | Count |
+|--------|------:|
 | TS unit tests | 510 |
-| TS integration (LLM) | 10 |
-| TS sync parity | 11 |
+| TS integration + sync parity | 21 |
 | Rust unit tests | 483 |
 | Rust integration (LLM) | 8 |
-| Stress test scenarios | 8 × 2 runtimes |
-| **Total** | **1,030** |
+| Stress test scenarios | 16 (8 × 2 runtimes) |
+| **Total** | **1,038** |
 
 ---
 
@@ -376,20 +423,48 @@ See [docs/TEST_COVERAGE.md](./TEST_COVERAGE.md) for full breakdown.
 ### Phase Next: Functional Dual-Loop
 
 1. **Clarification gates**: Inner loop pauses on `REQUEST_CONFIRMATION` directive, outer loop resumes with user response
-2. **WorldModel persistence**: Write facts to MemoryStore on task completion, reload on task start
-3. **Dynamic artifact reassignment**: Artifacts uploaded during task execution injected into inner loop context
+2. **Dynamic artifact reassignment**: Artifacts uploaded during task execution injected into inner loop context
+3. **Task result polling**: `GET /v1/tasks/:id` endpoint for clients that miss the `chat.final` event
+4. **Dual-mode response field**: Add explicit `taskId` and `mode` fields to `/v1/chat` response
 
 ### Phase Later: Multi-Agent Orchestration
 
-4. **SubAgentManager**: `spawn_agent`, `agent_status`, `await_agent` tools for primary agent
-5. **Parallel sub-agents**: Primary spawns N sub-agents, awaits all in parallel
-6. **File-level write locks**: Per-path async mutex for concurrent sub-agent file access
+5. **SubAgentManager**: `spawn_agent`, `agent_status`, `await_agent` tools for primary agent
+6. **Parallel sub-agents**: Primary spawns N sub-agents, awaits all in parallel
+7. **File-level write locks**: Per-path async mutex for concurrent sub-agent file access
+8. **Rust approval gates**: Port TS approval mechanism to Rust
 
 ### Phase Future: ComponentSpec & PEP
 
-7. **ComponentSpec serialization**: Level 1 (brief) / Level 2 (structured) / Level 3 (full) per component
-8. **PEP (Prismer Extension Protocol)**: Agent-built runtime extensions with hot reload
-9. **OT/CRDT for concurrent editing**: Agent + human co-editing same document
+9. **ComponentSpec serialization**: Level 1 (brief) / Level 2 (structured) / Level 3 (full) per component
+10. **PEP (Prismer Extension Protocol)**: Agent-built runtime extensions with hot reload
+11. **OT/CRDT for concurrent editing**: Agent + human co-editing same document
+
+---
+
+## 13. Known Limitations
+
+### WorldModel is per-task, not persisted
+
+WorldModel is created fresh for each dual-loop task and discarded on completion. Extracted knowledge facts are not written to the persistent MemoryStore. This means **cross-task knowledge continuity does not exist in dual-loop mode** — each task starts with a blank WorldModel. This directly limits the value of sequential complex task chains where earlier discoveries inform later tasks.
+
+**Mitigation path**: Write `knowledgeBase` facts to MemoryStore on task completion; reload via keyword recall on next task start (§12 item 2 in original design).
+
+### In-memory stores have no eviction
+
+`InMemoryTaskStore` and `InMemoryArtifactStore` grow unbounded. A long-running server instance accumulating completed tasks will leak memory. `SessionStore` has idle-timeout cleanup (TS only), but task/artifact stores do not.
+
+**Mitigation path**: Add TTL-based eviction for completed/failed tasks, or replace with persistent storage.
+
+### Dual-loop result delivery is fire-and-forget
+
+When the inner loop completes, `chat.final` is published to the EventBus. If no subscriber is listening (client disconnected), the result is lost. There is no persistent event log, no retry, and no polling endpoint for task results.
+
+**Mitigation path**: Add `GET /v1/tasks/:id` endpoint that returns task status + result from `InMemoryTaskStore`.
+
+### Rust cancellation is incomplete
+
+The Rust `DualLoopAgent.cancel()` sets a `cancelled` flag and transitions the task to `failed`, but the inner loop does not check this flag between iterations. A running Rust inner loop continues until the current agent cycle naturally completes.
 
 ---
 
@@ -399,8 +474,8 @@ See [docs/TEST_COVERAGE.md](./TEST_COVERAGE.md) for full breakdown.
 
 **In-process first**: Task store, artifact store, world model are all in-memory. Can be replaced with Redis/DB without changing the `IAgentLoop` interface.
 
-**Context budget per agent**: Each sub-agent gets a fresh session with ≤ 3K char handoff context. Context budget is per-agent, not per-task — scales to arbitrarily complex tasks.
+**Context budget per agent**: Each sub-agent gets a fresh session with configurable handoff context (default ≤ 3K chars, ~750 tokens). Context budget is per-agent, not per-task — scales to arbitrarily complex tasks.
 
 **Additive events**: New SSE/WS event types (`task.completed`, `chat.final`) are additive. Old clients ignore unknown types.
 
-**camelCase JSON**: All HTTP/WS/IPC interfaces use camelCase field names. Rust structs use `#[serde(rename_all = "camelCase")]` with snake_case aliases for backward compatibility.
+**camelCase JSON**: All HTTP/WS/IPC interfaces use camelCase field names. Rust structs use `#[serde(rename_all = "camelCase")]`. Legacy `session_id` alias accepted but deprecated.
