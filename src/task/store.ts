@@ -55,4 +55,18 @@ export class InMemoryTaskStore implements TaskStore {
   clear(): void {
     this.tasks.clear();
   }
+
+  /** Evict completed/failed tasks older than maxAgeMs. Returns count evicted. */
+  evictCompleted(maxAgeMs: number): number {
+    const now = Date.now();
+    let evicted = 0;
+    for (const [id, task] of this.tasks) {
+      if ((task.status === 'completed' || task.status === 'failed') &&
+          (now - task.updatedAt) > maxAgeMs) {
+        this.tasks.delete(id);
+        evicted++;
+      }
+    }
+    return evicted;
+  }
 }
