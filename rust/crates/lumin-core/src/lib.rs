@@ -26,15 +26,15 @@ pub mod task;
 pub mod world_model;
 
 // Re-exports
-pub use config::LuminConfig;
-pub use provider::{Provider, OpenAIProvider, FallbackProvider, ChatRequest, ChatResponse, ToolCall};
-pub use tools::{Tool, ToolRegistry, ToolContext};
+pub use config::{LuminConfig, ApprovalConfig, SessionConfig, ServerConfig, EventBusConfig, MemoryConfig};
+pub use provider::{Provider, OpenAIProvider, FallbackProvider, ChatRequest, ChatResponse, ToolCall, ContentBlock, ImageUrlBlock, MessageContent};
+pub use tools::{Tool, ToolRegistry, ToolContext, ToolEvent, EmitFn};
 pub use session::{Session, SessionStore};
 pub use agent::{PrismerAgent, AgentResult, AgentOptions};
 pub use agents::{AgentRegistry, AgentConfig, AgentMode, builtin_agents};
 pub use prompt::PromptBuilder;
 pub use skills::SkillLoader;
-pub use memory::MemoryStore;
+pub use memory::{MemoryStore, MemorySearchResult, MemorySearchOptions, MemoryCapabilities};
 pub use hooks::HookRegistry;
 pub use loop_types::{AgentLoop, LoopMode, AgentLoopInput, AgentLoopResult};
 pub use loop_factory::{create_agent_loop, resolve_loop_mode};

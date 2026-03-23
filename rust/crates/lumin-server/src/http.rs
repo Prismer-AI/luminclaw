@@ -308,6 +308,53 @@ pub async fn chat(
     }
 }
 
+// ── Tools ─────────────────────────────────────────────────
+
+/// GET /v1/tools — list registered tools in OpenAI format.
+/// Mirrors TS `handleTools()` in server.ts.
+pub async fn list_tools(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let mut tools = ToolRegistry::new();
+    tools.register(create_bash_tool(state.config.workspace.dir.clone()));
+
+    // memory_store + memory_recall
+    let wd = state.config.workspace.dir.clone();
+    tools.register(Tool {
+        name: "memory_store".into(),
+        description: "Store a memory entry for later recall.".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "content": { "type": "string", "description": "The memory content to store" },
+                "tags": { "type": "array", "items": { "type": "string" }, "description": "Optional tags" }
+            },
+            "required": ["content"]
+        }),
+        execute: std::sync::Arc::new(move |_args, _ctx| {
+            Box::pin(async move { String::new() })
+        }),
+    });
+    let wd2 = state.config.workspace.dir.clone();
+    tools.register(Tool {
+        name: "memory_recall".into(),
+        description: "Search stored memories by keywords.".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Keywords to search for" }
+            },
+            "required": ["query"]
+        }),
+        execute: std::sync::Arc::new(move |_args, _ctx| {
+            Box::pin(async move { String::new() })
+        }),
+    });
+
+    let specs = tools.get_specs();
+    Json(serde_json::json!({ "tools": specs, "count": specs.len() }))
+}
+
 // ── Artifacts ─────────────────────────────────────────────
 
 #[derive(Deserialize)]

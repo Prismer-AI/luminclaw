@@ -8,7 +8,7 @@ use tracing::{info, warn};
 /// Truncate oldest messages to fit within budget, keeping system + recent N.
 pub fn truncate_oldest_turns(messages: &mut Vec<Message>, max_chars: usize, keep_recent: usize) -> usize {
     let total: usize = messages.iter()
-        .map(|m| m.content.as_deref().unwrap_or("").len())
+        .map(|m| m.text_content().unwrap_or("").len())
         .sum();
 
     if total <= max_chars { return 0; }
@@ -24,9 +24,16 @@ pub fn truncate_oldest_turns(messages: &mut Vec<Message>, max_chars: usize, keep
 }
 
 /// Flush extractable facts from messages to memory before compaction.
+///
+/// Mirrors TS `memoryFlushBeforeCompaction()`:
+/// - Extracts file paths (already done)
+/// - Extracts decisions/choices mentioned
+/// - Writes to MemoryStore
 pub fn memory_flush_before_compaction(messages: &[Message], memory: &MemoryStore) {
     for msg in messages {
-        let content = msg.content.as_deref().unwrap_or("");
+        let content = msg.text_content().unwrap_or("");
+        if content.is_empty() { continue; }
+
         // Extract file paths
         for cap in content.match_indices("/workspace/") {
             let start = cap.0;
@@ -36,7 +43,75 @@ pub fn memory_flush_before_compaction(messages: &[Message], memory: &MemoryStore
             let path = &content[start..end];
             let _ = memory.store(&format!("File referenced: {path}"), &["file", "compaction"]);
         }
+
+        // Extract decisions/choices (lines starting with decision-like keywords)
+        let lower = content.to_lowercase();
+        let decision_markers = ["decided to ", "chose ", "decision:", "we'll use ", "going with ", "selected "];
+        for marker in &decision_markers {
+            if let Some(pos) = lower.find(marker) {
+                // Extract the sentence containing the decision
+                let start = content[..pos].rfind('\n').map(|p| p + 1).unwrap_or(0);
+                let end = content[pos..].find('\n').map(|e| pos + e).unwrap_or(content.len().min(pos + 200));
+                let decision = content[start..end].trim();
+                if !decision.is_empty() {
+                    let _ = memory.store(&format!("Decision: {decision}"), &["decision", "compaction"]);
+                }
+            }
+        }
     }
+}
+
+/// LLM-based memory flush — calls the provider to extract facts worth remembering.
+/// Mirrors TS `memoryFlushBeforeCompaction()` with LLM extraction.
+/// Silent, non-fatal.
+pub async fn memory_flush_with_llm(
+    provider: &dyn Provider,
+    dropped_messages: &[Message],
+    memory: &MemoryStore,
+    model: Option<&str>,
+) -> Result<(), String> {
+    let serialized = serialize_messages(dropped_messages);
+    let input = &serialized[..serialized.len().min(8000)];
+
+    let response = provider.chat(ChatRequest {
+        messages: vec![
+            Message::system(MEMORY_FLUSH_PROMPT),
+            Message::user(input),
+        ],
+        tools: None,
+        model: model.map(|s| s.to_string()),
+        max_tokens: Some(500),
+        stream: false,
+        temperature: None,
+        thinking_level: None,
+    }).await.map_err(|e| e.to_string())?;
+
+    let text = response.text.trim().to_string();
+    if !text.is_empty() && text != "NO_REPLY" {
+        let _ = memory.store(&text, &["auto-flush", "compaction"]);
+    }
+    Ok(())
+}
+
+const MEMORY_FLUSH_PROMPT: &str = "You are a memory extraction agent. Given a conversation excerpt that is about to be discarded, \
+extract ONLY facts worth remembering long-term: key decisions, important file paths, architecture choices, \
+user preferences, and action items. If nothing is worth remembering, reply with exactly \"NO_REPLY\". \
+Be extremely concise — bullet points only.";
+
+/// Serialize messages into a human-readable format for compaction input.
+fn serialize_messages(messages: &[Message]) -> String {
+    let mut parts = Vec::new();
+    for msg in messages {
+        let role = msg.role.to_uppercase();
+        let content = msg.text_content().unwrap_or("");
+        let content = &content[..content.len().min(3000)];
+        if msg.role == "tool" {
+            parts.push(format!("[TOOL RESULT] {}", &content[..content.len().min(500)]));
+        } else {
+            parts.push(format!("[{role}] {content}"));
+        }
+    }
+    parts.join("\n\n")
 }
 
 /// LLM-summarize dropped messages into a compact summary.
@@ -47,7 +122,7 @@ pub async fn summarize_dropped(
     if dropped.is_empty() { return Ok(String::new()); }
 
     let content: String = dropped.iter()
-        .filter_map(|m| m.content.as_deref())
+        .filter_map(|m| m.text_content())
         .take(20) // limit input
         .collect::<Vec<_>>()
         .join("\n---\n");
@@ -117,8 +192,8 @@ mod tests {
         // Should keep: system, C(100), latest(6)
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[0].role, "system");
-        assert!(msgs[1].content.as_deref().unwrap().starts_with("CCC"));
-        assert_eq!(msgs[2].content.as_deref().unwrap(), "latest");
+        assert!(msgs[1].text_content().unwrap().starts_with("CCC"));
+        assert_eq!(msgs[2].text_content().unwrap(), "latest");
     }
 
     #[test]
@@ -133,7 +208,7 @@ mod tests {
         assert!(removed > 0);
         // System message must always be first
         assert_eq!(msgs[0].role, "system");
-        assert_eq!(msgs[0].content.as_deref().unwrap(), "important system prompt");
+        assert_eq!(msgs[0].text_content().unwrap(), "important system prompt");
     }
 
     #[test]
@@ -151,9 +226,9 @@ mod tests {
         assert_eq!(removed, 2);
         assert_eq!(msgs.len(), 4); // system + 3 recent
         assert_eq!(msgs[0].role, "system");
-        assert_eq!(msgs[1].content.as_deref().unwrap(), "recent1");
-        assert_eq!(msgs[2].content.as_deref().unwrap(), "recent2");
-        assert_eq!(msgs[3].content.as_deref().unwrap(), "recent3");
+        assert_eq!(msgs[1].text_content().unwrap(), "recent1");
+        assert_eq!(msgs[2].text_content().unwrap(), "recent2");
+        assert_eq!(msgs[3].text_content().unwrap(), "recent3");
     }
 
     #[test]
@@ -190,7 +265,7 @@ mod tests {
         assert_eq!(msgs[2].role, "assistant");
         assert!(msgs[2].tool_calls.is_some());
         assert_eq!(msgs[3].role, "tool");
-        assert_eq!(msgs[3].content.as_deref().unwrap(), "file1.txt\nfile2.txt");
+        assert_eq!(msgs[3].text_content().unwrap(), "file1.txt\nfile2.txt");
     }
 
     // ── Additional tests for TS parity ──
@@ -224,9 +299,9 @@ mod tests {
         assert_eq!(removed, 4);
         assert_eq!(msgs.len(), 3); // system + 2 recent
         assert_eq!(msgs[0].role, "system");
-        assert_eq!(msgs[0].content.as_deref().unwrap(), "system prompt");
-        assert_eq!(msgs[1].content.as_deref().unwrap(), "recent question");
-        assert_eq!(msgs[2].content.as_deref().unwrap(), "recent answer");
+        assert_eq!(msgs[0].text_content().unwrap(), "system prompt");
+        assert_eq!(msgs[1].text_content().unwrap(), "recent question");
+        assert_eq!(msgs[2].text_content().unwrap(), "recent answer");
     }
 
     #[test]
@@ -242,7 +317,7 @@ mod tests {
         // Nothing should be removed — no tool messages at all
         assert_eq!(msgs.len(), 5);
         assert_eq!(msgs[2].role, "assistant");
-        assert_eq!(msgs[2].content.as_deref().unwrap(), "just a normal reply");
+        assert_eq!(msgs[2].text_content().unwrap(), "just a normal reply");
     }
 
     #[test]

@@ -6,10 +6,22 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+/// Event emitted by a tool during execution via [`ToolContext::emit`].
+#[derive(Debug, Clone)]
+pub struct ToolEvent {
+    pub event_type: String, // "directive", "progress", "output"
+    pub data: serde_json::Value,
+}
+
+/// Emit callback type: tools call this to send events (directives, progress, etc.)
+pub type EmitFn = Box<dyn Fn(ToolEvent) + Send + Sync>;
+
 pub struct ToolContext {
     pub workspace_dir: String,
     pub session_id: String,
     pub agent_id: String,
+    /// Optional emit callback — tools can publish directives/progress events through this.
+    pub emit: Option<EmitFn>,
 }
 
 pub type ToolFn = Arc<
@@ -69,6 +81,27 @@ impl ToolRegistry {
                 }
             })
         }).collect()
+    }
+
+    /// Get tool specs filtered to only the allowed tool names.
+    /// If `allowed` is empty, returns all specs (same as [`get_specs`]).
+    pub fn get_specs_filtered(&self, allowed: &[String]) -> Vec<Value> {
+        if allowed.is_empty() {
+            return self.get_specs();
+        }
+        self.tools.values()
+            .filter(|t| allowed.iter().any(|a| a == &t.name))
+            .map(|t| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters,
+                    }
+                })
+            })
+            .collect()
     }
 }
 
@@ -142,6 +175,7 @@ mod tests {
             workspace_dir: "/tmp".into(),
             session_id: "test-session".into(),
             agent_id: "test-agent".into(),
+            emit: None,
         }
     }
 
@@ -395,6 +429,7 @@ mod tests {
             workspace_dir: "/my/workspace".into(),
             session_id: "sess-42".into(),
             agent_id: "agent-007".into(),
+            emit: None,
         };
         let result = reg.execute("ctx_reader", serde_json::json!({}), &ctx).await.unwrap();
         assert!(result.contains("ws=/my/workspace"));
@@ -511,5 +546,61 @@ mod tests {
             assert!(spec["function"]["description"].is_string());
             assert!(spec["function"]["parameters"].is_object());
         }
+    }
+
+    // ── get_specs_filtered tests ──
+
+    #[test]
+    fn get_specs_filtered_returns_subset() {
+        let mut reg = ToolRegistry::new();
+        reg.register(create_test_tool("bash", "Execute bash"));
+        reg.register(create_test_tool("read_file", "Read a file"));
+        reg.register(create_test_tool("write_file", "Write a file"));
+        reg.register(create_test_tool("echo", "Echo text"));
+
+        let allowed = vec!["bash".to_string(), "echo".to_string()];
+        let specs = reg.get_specs_filtered(&allowed);
+
+        assert_eq!(specs.len(), 2);
+        let names: Vec<&str> = specs.iter()
+            .map(|s| s["function"]["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"bash"));
+        assert!(names.contains(&"echo"));
+        assert!(!names.contains(&"read_file"));
+        assert!(!names.contains(&"write_file"));
+    }
+
+    #[test]
+    fn get_specs_filtered_empty_allowed_returns_all() {
+        let mut reg = ToolRegistry::new();
+        reg.register(create_test_tool("a", "A"));
+        reg.register(create_test_tool("b", "B"));
+        reg.register(create_test_tool("c", "C"));
+
+        let specs = reg.get_specs_filtered(&[]);
+        assert_eq!(specs.len(), 3);
+    }
+
+    #[test]
+    fn get_specs_filtered_unknown_names_ignored() {
+        let mut reg = ToolRegistry::new();
+        reg.register(create_test_tool("bash", "Bash"));
+        reg.register(create_test_tool("echo", "Echo"));
+
+        let allowed = vec!["bash".to_string(), "nonexistent".to_string()];
+        let specs = reg.get_specs_filtered(&allowed);
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0]["function"]["name"], "bash");
+    }
+
+    #[test]
+    fn get_specs_filtered_all_unknown_returns_empty() {
+        let mut reg = ToolRegistry::new();
+        reg.register(create_test_tool("bash", "Bash"));
+
+        let allowed = vec!["foo".to_string(), "bar".to_string()];
+        let specs = reg.get_specs_filtered(&allowed);
+        assert!(specs.is_empty());
     }
 }

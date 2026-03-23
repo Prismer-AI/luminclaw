@@ -14,6 +14,65 @@ pub struct LuminConfig {
     pub agent: AgentConfig,
     #[serde(default)]
     pub workspace: WorkspaceConfig,
+    #[serde(default)]
+    pub approval: ApprovalConfig,
+    #[serde(default)]
+    pub session: SessionConfig,
+    #[serde(default)]
+    pub server: ServerConfig,
+    #[serde(default)]
+    pub event_bus: EventBusConfig,
+    #[serde(default)]
+    pub memory: MemoryConfig,
+}
+
+/// Approval gate for sensitive tools — mirrors TS `approval` config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalConfig {
+    #[serde(default = "default_approval_timeout")]
+    pub timeout_ms: u64,
+    #[serde(default = "default_sensitive_tools")]
+    pub sensitive_tools: Vec<String>,
+    #[serde(default = "default_bash_patterns")]
+    pub bash_patterns: Vec<String>,
+}
+
+/// Session management — mirrors TS `session` config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionConfig {
+    #[serde(default = "default_session_max_idle")]
+    pub max_idle_ms: u64,
+    #[serde(default = "default_cleanup_interval")]
+    pub cleanup_interval_ms: u64,
+}
+
+/// Server internals — mirrors TS `server` config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerConfig {
+    #[serde(default = "default_body_timeout")]
+    pub body_timeout_ms: u64,
+    #[serde(default = "default_ws_heartbeat")]
+    pub ws_heartbeat_ms: u64,
+    #[serde(default = "default_shutdown_timeout")]
+    pub shutdown_timeout_ms: u64,
+    #[serde(default = "default_cors_max_age")]
+    pub cors_max_age: u32,
+}
+
+/// EventBus backpressure settings — mirrors TS `eventBus` config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventBusConfig {
+    #[serde(default = "default_max_buffer")]
+    pub max_buffer: usize,
+}
+
+/// Memory backend settings — mirrors TS `memory` config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryConfig {
+    #[serde(default = "default_memory_backend")]
+    pub backend: String,
+    #[serde(default = "default_recent_context_max_chars")]
+    pub recent_context_max_chars: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +121,23 @@ fn default_max_context_chars() -> usize { 600_000 }
 fn default_loop_mode() -> String { "single".into() }
 fn default_workspace_dir() -> String { "/workspace".into() }
 fn default_plugin_path() -> String { "/opt/prismer/plugins/prismer-workspace/dist/src/tools.js".into() }
+fn default_approval_timeout() -> u64 { 30_000 }
+fn default_sensitive_tools() -> Vec<String> { vec!["bash".into()] }
+fn default_bash_patterns() -> Vec<String> {
+    vec![
+        r"\brm\s".into(), r"\brmdir\b".into(), r"\bmv\s".into(),
+        r"\bchmod\b".into(), r"\bchown\b".into(), r"\bkill\b".into(),
+    ]
+}
+fn default_session_max_idle() -> u64 { 1_800_000 } // 30 min
+fn default_cleanup_interval() -> u64 { 60_000 }
+fn default_body_timeout() -> u64 { 30_000 }
+fn default_ws_heartbeat() -> u64 { 30_000 }
+fn default_shutdown_timeout() -> u64 { 5_000 }
+fn default_cors_max_age() -> u32 { 86_400 }
+fn default_max_buffer() -> usize { 1_000 }
+fn default_memory_backend() -> String { "file".into() }
+fn default_recent_context_max_chars() -> usize { 3_000 }
 
 impl Default for LlmConfig {
     fn default() -> Self {
@@ -95,6 +171,51 @@ impl Default for WorkspaceConfig {
     }
 }
 
+impl Default for ApprovalConfig {
+    fn default() -> Self {
+        Self {
+            timeout_ms: default_approval_timeout(),
+            sensitive_tools: default_sensitive_tools(),
+            bash_patterns: default_bash_patterns(),
+        }
+    }
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            max_idle_ms: default_session_max_idle(),
+            cleanup_interval_ms: default_cleanup_interval(),
+        }
+    }
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            body_timeout_ms: default_body_timeout(),
+            ws_heartbeat_ms: default_ws_heartbeat(),
+            shutdown_timeout_ms: default_shutdown_timeout(),
+            cors_max_age: default_cors_max_age(),
+        }
+    }
+}
+
+impl Default for EventBusConfig {
+    fn default() -> Self {
+        Self { max_buffer: default_max_buffer() }
+    }
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            backend: default_memory_backend(),
+            recent_context_max_chars: default_recent_context_max_chars(),
+        }
+    }
+}
+
 impl LuminConfig {
     /// Load configuration from environment variables.
     pub fn from_env() -> Self {
@@ -115,6 +236,18 @@ impl LuminConfig {
         if let Ok(v) = std::env::var("WORKSPACE_DIR") { cfg.workspace.dir = v; }
         if let Ok(v) = std::env::var("MAX_CONTEXT_CHARS") { cfg.agent.max_context_chars = v.parse().unwrap_or(600_000); }
 
+        // Approval
+        if let Ok(v) = std::env::var("APPROVAL_TIMEOUT_MS") { cfg.approval.timeout_ms = v.parse().unwrap_or(30_000); }
+        if let Ok(v) = std::env::var("SENSITIVE_TOOLS") {
+            cfg.approval.sensitive_tools = v.split(',').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
+        }
+
+        // Session
+        if let Ok(v) = std::env::var("SESSION_MAX_IDLE_MS") { cfg.session.max_idle_ms = v.parse().unwrap_or(1_800_000); }
+
+        // Memory
+        if let Ok(v) = std::env::var("MEMORY_BACKEND") { cfg.memory.backend = v; }
+
         cfg
     }
 }
@@ -127,6 +260,11 @@ impl Default for LuminConfig {
             llm: LlmConfig::default(),
             agent: AgentConfig::default(),
             workspace: WorkspaceConfig::default(),
+            approval: ApprovalConfig::default(),
+            session: SessionConfig::default(),
+            server: ServerConfig::default(),
+            event_bus: EventBusConfig::default(),
+            memory: MemoryConfig::default(),
         }
     }
 }

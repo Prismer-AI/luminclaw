@@ -1,16 +1,20 @@
 //! Core agent loop — full implementation mirroring TypeScript `agent.ts`.
-//! LLM → tool execution → doom-loop detection → context guard → compaction.
+//! LLM → tool execution → approval gates → sub-agent delegation →
+//! directive file scanning → doom-loop detection → context guard → compaction.
 
-use crate::provider::{Provider, ChatRequest, ChatResponse, Message, ToolCall, Usage};
-use crate::tools::{ToolRegistry, ToolContext};
+use crate::provider::{Provider, ChatRequest, Message, ToolCall, Usage};
+use crate::tools::{ToolRegistry, ToolContext, ToolEvent};
 use crate::session::Session;
-use crate::hooks::{HookRegistry, HookContext, BeforeToolResult};
+use crate::hooks::{HookRegistry, HookContext};
 use crate::sse::{EventBus, AgentEvent};
+use crate::agents::{AgentRegistry, AgentMode};
 use crate::directives::Directive;
 use crate::compaction;
+use regex_lite::Regex;
 use std::collections::{HashSet, HashMap};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use tokio::sync::oneshot;
 use tracing::{info, warn, error};
 
 // ── Result ────────────────────────────────────────────────
@@ -34,6 +38,11 @@ pub struct AgentOptions {
     pub doom_loop_threshold: u32,
     pub repetition_threshold: u32,
     pub sensitive_tools: HashSet<String>,
+    /// Regex patterns matching destructive bash commands (rm, mv, chmod, etc.).
+    /// If a bash tool call's command matches any pattern, approval is required.
+    pub bash_sensitive_patterns: Vec<String>,
+    /// Timeout in milliseconds before auto-rejecting an approval request.
+    pub approval_timeout_ms: u64,
 }
 
 impl Default for AgentOptions {
@@ -45,6 +54,15 @@ impl Default for AgentOptions {
             doom_loop_threshold: 3,
             repetition_threshold: 5,
             sensitive_tools: HashSet::from(["bash".to_string()]),
+            bash_sensitive_patterns: vec![
+                r"\brm\s".to_string(),
+                r"\brmdir\b".to_string(),
+                r"\bmv\s".to_string(),
+                r"\bchmod\b".to_string(),
+                r"\bchown\b".to_string(),
+                r"\bkill\b".to_string(),
+            ],
+            approval_timeout_ms: 300_000, // 5 minutes
         }
     }
 }
@@ -56,11 +74,16 @@ pub struct PrismerAgent {
     tools: Arc<ToolRegistry>,
     bus: Arc<EventBus>,
     hooks: Option<Arc<HookRegistry>>,
+    agents: Option<Arc<AgentRegistry>>,
     system_prompt: String,
     model: String,
     agent_id: String,
     workspace_dir: String,
     opts: AgentOptions,
+    /// Compiled regex patterns for bash sensitive commands.
+    bash_patterns: Vec<Regex>,
+    /// Pending approval resolvers — keyed by toolId, resolved by external approval response.
+    approval_resolvers: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>,
 }
 
 impl PrismerAgent {
@@ -73,20 +96,262 @@ impl PrismerAgent {
         agent_id: String,
         workspace_dir: String,
     ) -> Self {
+        let opts = AgentOptions::default();
+        let bash_patterns = compile_bash_patterns(&opts.bash_sensitive_patterns);
         Self {
-            provider, tools, bus, hooks: None,
+            provider, tools, bus, hooks: None, agents: None,
             system_prompt, model, agent_id, workspace_dir,
-            opts: AgentOptions::default(),
+            bash_patterns,
+            approval_resolvers: Arc::new(Mutex::new(HashMap::new())),
+            opts,
         }
     }
 
     pub fn with_options(mut self, opts: AgentOptions) -> Self {
-        self.opts = opts; self
+        self.bash_patterns = compile_bash_patterns(&opts.bash_sensitive_patterns);
+        self.opts = opts;
+        self
     }
 
     pub fn with_hooks(mut self, hooks: Arc<HookRegistry>) -> Self {
         self.hooks = Some(hooks); self
     }
+
+    pub fn with_agents(mut self, agents: Arc<AgentRegistry>) -> Self {
+        self.agents = Some(agents); self
+    }
+
+    // ── Approval gates (TS parity: lines 165-202, 438-454) ──
+
+    /// Check if a tool call needs human approval before execution.
+    /// Matches the TypeScript `needsApproval(toolName, args)` method.
+    pub fn needs_approval(&self, tool_name: &str, args: &serde_json::Value) -> bool {
+        if !self.opts.sensitive_tools.contains(tool_name) {
+            return false;
+        }
+        // bash: only flag destructive commands matching patterns
+        if tool_name == "bash" {
+            let cmd = args.get("command")
+                .or_else(|| args.get("cmd"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            return self.bash_patterns.iter().any(|p| p.is_match(cmd));
+        }
+        // All other sensitive tools always require approval
+        true
+    }
+
+    /// Resolve a pending approval request (called from WS handler or external code).
+    pub fn resolve_approval(&self, tool_id: &str, approved: bool) {
+        let mut resolvers = self.approval_resolvers.lock().unwrap();
+        if let Some(sender) = resolvers.remove(tool_id) {
+            let _ = sender.send(approved);
+        }
+    }
+
+    /// Wait for external approval with timeout. Returns false on timeout (safe default).
+    async fn wait_for_approval(&self, tool_id: &str) -> bool {
+        let (tx, rx) = oneshot::channel::<bool>();
+        {
+            let mut resolvers = self.approval_resolvers.lock().unwrap();
+            resolvers.insert(tool_id.to_string(), tx);
+        }
+        let timeout = Duration::from_millis(self.opts.approval_timeout_ms);
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(approved)) => approved,
+            _ => {
+                // Timeout or channel dropped -> reject (safe default)
+                warn!(tool_id, timeout_ms = self.opts.approval_timeout_ms, "approval timed out, rejecting");
+                let mut resolvers = self.approval_resolvers.lock().unwrap();
+                resolvers.remove(tool_id);
+                false
+            }
+        }
+    }
+
+    // ── Directive file scanning (TS parity: lines 208-231) ──
+
+    /// Snapshot current directive files (before tool execution).
+    fn snapshot_directive_files(&self) -> HashSet<String> {
+        let dir_path = format!("{}/.openclaw/directives", self.workspace_dir);
+        match std::fs::read_dir(&dir_path) {
+            Ok(entries) => entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .filter(|f| f.ends_with(".json"))
+                .collect(),
+            Err(_) => HashSet::new(),
+        }
+    }
+
+    /// Scan {workspace_dir}/.openclaw/directives/ for directive files written by plugin tools.
+    /// Emits them on the EventBus and accumulates directives, then deletes processed files.
+    fn scan_directive_files(&self, directives: &mut Vec<Directive>, known_files: &HashSet<String>) {
+        let dir_path = format!("{}/.openclaw/directives", self.workspace_dir);
+        let files = match std::fs::read_dir(&dir_path) {
+            Ok(entries) => entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .filter(|f| f.ends_with(".json"))
+                .collect::<Vec<_>>(),
+            Err(_) => return, // Directory doesn't exist yet
+        };
+
+        for file in files {
+            if known_files.contains(&file) {
+                continue;
+            }
+            let file_path = format!("{}/{}", dir_path, file);
+            let raw = match std::fs::read_to_string(&file_path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let parsed: serde_json::Value = match serde_json::from_str(&raw) {
+                Ok(v) => v,
+                Err(_) => continue, // Skip malformed files
+            };
+
+            let directive = Directive {
+                r#type: parsed["type"].as_str().unwrap_or("UNKNOWN").to_string(),
+                payload: parsed.get("payload").cloned().unwrap_or(serde_json::json!({})),
+                timestamp: parsed["timestamp"].as_str().map(|s| s.to_string()),
+                emitted_by: None,
+                task_id: None,
+                source: None,
+                state_version: None,
+            };
+
+            self.bus.publish(AgentEvent {
+                event_type: "directive".into(),
+                data: serde_json::json!({
+                    "type": directive.r#type,
+                    "payload": directive.payload,
+                    "timestamp": directive.timestamp,
+                }),
+            });
+
+            directives.push(directive);
+
+            // Delete processed file
+            let _ = std::fs::remove_file(&file_path);
+        }
+    }
+
+    // ── Sub-agent delegation (TS parity: lines 268-274, 560-640) ──
+
+    /// Delegate to a sub-agent.
+    fn delegate_to_sub_agent<'a>(
+        &'a self,
+        agent_id: &'a str,
+        message: &'a str,
+        parent_session: &'a Session,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<AgentResult, String>> + Send + 'a>> {
+        Box::pin(async move {
+        let agents = self.agents.as_ref().ok_or("No agent registry available")?;
+        let config = agents.get(agent_id)
+            .ok_or_else(|| format!("Unknown sub-agent: {agent_id}"))?;
+
+        if config.mode == AgentMode::Hidden {
+            return Err(format!("Unknown sub-agent: {agent_id}"));
+        }
+
+        self.bus.publish(AgentEvent {
+            event_type: "subagent.start".into(),
+            data: serde_json::json!({ "parentAgent": self.agent_id, "subAgent": agent_id }),
+        });
+
+        let mut child_session = parent_session.create_child(agent_id);
+
+        let sub_agent = PrismerAgent::new(
+            self.provider.clone(),
+            self.tools.clone(),
+            self.bus.clone(),
+            config.system_prompt.clone(),
+            config.model.clone().unwrap_or_else(|| self.model.clone()),
+            config.id.clone(),
+            self.workspace_dir.clone(),
+        ).with_options(AgentOptions {
+            max_iterations: config.max_iterations.unwrap_or(20),
+            ..AgentOptions::default()
+        });
+
+        // If agents registry exists, pass it to sub-agent too
+        let sub_agent = if let Some(ref agents) = self.agents {
+            sub_agent.with_agents(agents.clone())
+        } else {
+            sub_agent
+        };
+
+        let result = sub_agent.process_message(message, &mut child_session, None).await?;
+
+        self.bus.publish(AgentEvent {
+            event_type: "subagent.end".into(),
+            data: serde_json::json!({
+                "parentAgent": self.agent_id,
+                "subAgent": agent_id,
+                "toolsUsed": result.tools_used,
+                "iterations": result.iterations,
+            }),
+        });
+
+        Ok(result)
+        })
+    }
+
+    /// Handle the "delegate" tool call (invoked via LLM tool calling).
+    async fn handle_delegate_call(
+        &self,
+        call: &ToolCall,
+        session: &Session,
+        tools_used: &mut HashSet<String>,
+    ) -> (String, bool) {
+        let target_agent = call.arguments.get("agent").and_then(|v| v.as_str()).unwrap_or("");
+        let task = call.arguments.get("task").and_then(|v| v.as_str()).unwrap_or("");
+
+        if target_agent.is_empty() || task.is_empty() {
+            return ("Error: delegate requires \"agent\" and \"task\" arguments".into(), true);
+        }
+
+        tools_used.insert(format!("delegate:{target_agent}"));
+
+        match self.delegate_to_sub_agent(target_agent, task, session).await {
+            Ok(result) => (result.text, false),
+            Err(e) => (format!("Delegation failed: {e}"), true),
+        }
+    }
+
+    /// Build the delegate tool spec for LLM.
+    fn get_delegate_tool_spec(&self) -> Option<serde_json::Value> {
+        let agents = self.agents.as_ref()?;
+        let delegatable = agents.get_delegatable_agents();
+        if delegatable.is_empty() {
+            return None;
+        }
+        Some(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "delegate",
+                "description": format!("Delegate a task to a specialized sub-agent. Available: {}", delegatable.join(", ")),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "agent": {
+                            "type": "string",
+                            "enum": delegatable,
+                            "description": "The sub-agent to delegate to"
+                        },
+                        "task": {
+                            "type": "string",
+                            "description": "The task description for the sub-agent"
+                        }
+                    },
+                    "required": ["agent", "task"]
+                }
+            }
+        }))
+    }
+
+    // ── Main loop ─────────────────────────────────────────────
 
     pub async fn process_message(
         &self,
@@ -107,10 +372,43 @@ impl PrismerAgent {
             data: serde_json::json!({ "sessionId": session.id, "agentId": self.agent_id, "input": &input[..input.len().min(200)] }),
         });
 
+        // ── Check @-mention for explicit sub-agent delegation (TS parity: lines 268-274) ──
+        if let Some(ref agents) = self.agents {
+            if let Some((agent_id, message)) = agents.resolve_from_mention(input) {
+                let result = self.delegate_to_sub_agent(agent_id, message, session).await?;
+                self.bus.publish(AgentEvent {
+                    event_type: "agent.end".into(),
+                    data: serde_json::json!({ "sessionId": session.id, "toolsUsed": result.tools_used }),
+                });
+                return Ok(result);
+            }
+        }
+
         // Persist user input to session for multi-turn recall
         session.add_message(Message::user(input));
 
-        let tool_specs = self.tools.get_specs();
+        // Get tool specs (filter by agent config if sub-agent)
+        let mut tool_specs = if let Some(ref agents) = self.agents {
+            let agent_config = agents.get(&self.agent_id);
+            match agent_config.and_then(|c| c.tools.as_ref()) {
+                Some(allowed) => self.tools.get_specs_filtered(allowed),
+                None => self.tools.get_specs(),
+            }
+        } else {
+            self.tools.get_specs()
+        };
+
+        // Add delegate tool if this is the primary agent and sub-agents exist
+        if let Some(ref agents) = self.agents {
+            let agent_config = agents.get(&self.agent_id);
+            let is_primary = agent_config.map_or(true, |c| c.mode == AgentMode::Primary);
+            if is_primary {
+                if let Some(delegate_spec) = self.get_delegate_tool_spec() {
+                    tool_specs.push(delegate_spec);
+                }
+            }
+        }
+
         let mut actual_iterations = 0u32;
 
         for iteration in 1..=self.opts.max_iterations {
@@ -127,7 +425,7 @@ impl PrismerAgent {
             let mut messages = session.build_messages(&self.system_prompt);
 
             let total_chars: usize = messages.iter()
-                .map(|m| m.content.as_deref().unwrap_or("").len())
+                .map(|m| m.content.as_ref().map_or(0, |c| c.char_len()))
                 .sum();
 
             if total_chars > self.opts.max_context_chars {
@@ -140,9 +438,6 @@ impl PrismerAgent {
                     });
                 }
             }
-
-            // ── Hook: before_prompt ──
-            // (hooks can modify system prompt — skipped if no hooks registered)
 
             info!(iteration, model = %self.model, message_count = messages.len(), tool_count = tool_specs.len(), "llm_request");
 
@@ -182,7 +477,7 @@ impl PrismerAgent {
             last_text = response.text.clone();
             last_thinking = response.thinking.clone();
 
-            // ── No tool calls → final response ──
+            // ── No tool calls -> final response ──
             if response.tool_calls.is_empty() {
                 session.add_message(Message::assistant(&response.text));
                 self.bus.publish(AgentEvent {
@@ -202,8 +497,18 @@ impl PrismerAgent {
             session.add_message(Message::assistant_with_tools(tc_json, response.thinking.clone()));
 
             // ── Execute tools ──
+            let pre_tool_directive_files = self.snapshot_directive_files();
             let mut all_errors = true;
+
             for call in &response.tool_calls {
+                // Handle delegate tool specially
+                if call.name == "delegate" {
+                    let (output, is_error) = self.handle_delegate_call(call, session, &mut tools_used).await;
+                    if !is_error { all_errors = false; }
+                    session.add_message(Message::tool_result(&call.id, &output));
+                    continue;
+                }
+
                 tools_used.insert(call.name.clone());
 
                 // Repetition detection
@@ -211,21 +516,15 @@ impl PrismerAgent {
                 let count = tool_signatures.entry(sig).or_insert(0);
                 *count += 1;
                 if *count >= self.opts.repetition_threshold {
-                    warn!(tool = %call.name, count = *count, "repetition detected — stopping");
+                    warn!(tool = %call.name, count = *count, "repetition detected, stopping");
                     last_text = format!("Stopping: repeated {} call {} times.", call.name, count);
                     self.bus.publish(AgentEvent {
                         event_type: "error".into(),
                         data: serde_json::json!({ "error": "repetition_detected", "tool": call.name }),
                     });
-                    // Break out of both loops
                     session.add_message(Message::tool_result(&call.id, &last_text));
                     break;
                 }
-
-                self.bus.publish(AgentEvent {
-                    event_type: "tool.start".into(),
-                    data: serde_json::json!({ "sessionId": session.id, "tool": call.name, "toolId": call.id }),
-                });
 
                 // Hook: before_tool
                 if let Some(ref hooks) = self.hooks {
@@ -241,16 +540,79 @@ impl PrismerAgent {
                     }
                 }
 
-                // Execute
+                // ── Approval gate (TS parity: lines 438-454) ──
+                if self.needs_approval(&call.name, &call.arguments) {
+                    let reason = format!("Tool \"{}\" requires approval", call.name);
+                    self.bus.publish(AgentEvent {
+                        event_type: "tool.approval_required".into(),
+                        data: serde_json::json!({
+                            "sessionId": session.id,
+                            "tool": call.name,
+                            "toolId": call.id,
+                            "args": call.arguments,
+                            "reason": reason,
+                        }),
+                    });
+                    let approved = self.wait_for_approval(&call.id).await;
+                    self.bus.publish(AgentEvent {
+                        event_type: "tool.approval_response".into(),
+                        data: serde_json::json!({
+                            "toolId": call.id,
+                            "approved": approved,
+                            "reason": if approved { "approved" } else { "rejected/timeout" },
+                        }),
+                    });
+                    if !approved {
+                        session.add_message(Message::tool_result(&call.id, "[Tool blocked: approval denied or timed out]"));
+                        continue;
+                    }
+                }
+
+                self.bus.publish(AgentEvent {
+                    event_type: "tool.start".into(),
+                    data: serde_json::json!({ "sessionId": session.id, "tool": call.name, "toolId": call.id }),
+                });
+
+                // ── Execute with ToolContext.emit wired up (TS parity: tools/index.ts) ──
+                let bus_for_emit = self.bus.clone();
+                let directives_for_emit: Arc<Mutex<Vec<Directive>>> = Arc::new(Mutex::new(Vec::new()));
+                let directives_clone = directives_for_emit.clone();
+                let emit_fn = Box::new(move |event: ToolEvent| {
+                    if event.event_type == "directive" {
+                        let directive = Directive {
+                            r#type: event.data.get("type").and_then(|v| v.as_str()).unwrap_or("UNKNOWN").to_string(),
+                            payload: event.data.get("payload").cloned().unwrap_or(serde_json::json!({})),
+                            timestamp: event.data.get("timestamp").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                            emitted_by: None,
+                            task_id: None,
+                            source: None,
+                            state_version: None,
+                        };
+                        directives_clone.lock().unwrap().push(directive);
+                        bus_for_emit.publish(AgentEvent {
+                            event_type: "directive".into(),
+                            data: event.data,
+                        });
+                    }
+                });
+
                 let ctx = ToolContext {
                     workspace_dir: self.workspace_dir.clone(),
                     session_id: session.id.clone(),
                     agent_id: self.agent_id.clone(),
+                    emit: Some(emit_fn),
                 };
+
                 let result = match self.tools.execute(&call.name, call.arguments.clone(), &ctx).await {
                     Ok(output) => { all_errors = false; output }
                     Err(e) => format!("Error: {e}"),
                 };
+
+                // Collect any directives emitted by the tool via emit()
+                {
+                    let emitted = directives_for_emit.lock().unwrap();
+                    all_directives.extend(emitted.iter().cloned());
+                }
 
                 // Truncate oversized results
                 let truncated = if result.len() > self.opts.max_tool_result_chars {
@@ -278,6 +640,9 @@ impl PrismerAgent {
 
                 session.add_message(Message::tool_result(&call.id, &truncated));
             }
+
+            // ── Scan for directive files written by plugin tools (filesystem fallback) ──
+            self.scan_directive_files(&mut all_directives, &pre_tool_directive_files);
 
             // ── Doom-loop detection ──
             if all_errors {
@@ -316,11 +681,18 @@ impl PrismerAgent {
             text: last_text,
             thinking: last_thinking,
             directives: all_directives,
-            tools_used: tools_vec.clone(),
+            tools_used: tools_vec,
             usage: Some(total_usage),
             iterations: actual_iterations,
         })
     }
+}
+
+/// Compile bash-sensitive regex patterns from string list.
+fn compile_bash_patterns(patterns: &[String]) -> Vec<Regex> {
+    patterns.iter()
+        .filter_map(|p| Regex::new(p).ok())
+        .collect()
 }
 
 // ── Tests ────────────────────────────────────────────────
@@ -330,6 +702,7 @@ mod tests {
     use super::*;
     use crate::provider::{Provider, ChatRequest, ChatResponse, ProviderError, ToolCall, Usage};
     use crate::tools::{Tool, ToolRegistry};
+    use crate::agents::{AgentConfig, AgentMode, AgentRegistry, builtin_agents};
     use crate::session::Session;
     use crate::sse::EventBus;
     use std::sync::{Arc, Mutex};
@@ -371,7 +744,6 @@ mod tests {
         fn name(&self) -> &str { "mock" }
     }
 
-    /// A provider that always returns an error.
     struct FailingProvider;
 
     #[async_trait::async_trait]
@@ -383,12 +755,10 @@ mod tests {
         fn name(&self) -> &str { "failing" }
     }
 
-    // ── Helper functions ────────────────────────────────────
+    // ── Helpers ─────────────────────────────────────────────
 
     fn create_tools() -> ToolRegistry {
         let mut tools = ToolRegistry::new();
-
-        // echo tool — returns "Echo: {text}"
         tools.register(Tool {
             name: "echo".into(),
             description: "Echo input".into(),
@@ -404,457 +774,462 @@ mod tests {
                 })
             }),
         });
-
-        // big_output tool — returns 200K chars
         tools.register(Tool {
             name: "big_output".into(),
             description: "Returns a large output".into(),
             parameters: serde_json::json!({ "type": "object", "properties": {} }),
             execute: Arc::new(|_args, _ctx| {
-                Box::pin(async move {
-                    "X".repeat(200_000)
-                })
+                Box::pin(async move { "X".repeat(200_000) })
             }),
         });
-
-        // failing_tool — returns an error string (tools.execute returns Err)
-        // Note: ToolRegistry::execute returns Err only for unknown tools.
-        // A tool function that panics/errors must return the error itself.
-        // In the TS test, the tool throws. In Rust, ToolFn returns String,
-        // so we simulate a "failing" tool by registering it as an unknown tool name.
-        // Actually, looking at the agent code, an unknown tool goes through
-        // self.tools.execute() which returns Err("Tool not found: ...").
-        // For the doom loop test we need a tool that the agent calls and gets
-        // an error from. The simplest is to NOT register "failing_tool" so it
-        // returns Err from execute(). But we also need it to show up in tool specs.
-        // Actually — the agent calls self.tools.execute() and if Err, formats
-        // "Error: {e}". So we can just not register the tool, and when the mock
-        // provider returns a tool_call to "failing_tool", execute returns Err.
-
         tools
     }
 
     fn create_agent(provider: Arc<dyn Provider>, tools: Option<ToolRegistry>) -> PrismerAgent {
         let tools = tools.unwrap_or_else(create_tools);
         PrismerAgent::new(
-            provider,
-            Arc::new(tools),
-            Arc::new(EventBus::default()),
-            "You are a test agent.".into(),
-            "test-model".into(),
-            "researcher".into(),
-            "/tmp".into(),
+            provider, Arc::new(tools), Arc::new(EventBus::default()),
+            "You are a test agent.".into(), "test-model".into(), "researcher".into(), "/tmp".into(),
         )
     }
 
     fn make_tool_call(id: &str, name: &str, args: serde_json::Value) -> ToolCall {
-        ToolCall {
-            id: id.into(),
-            name: name.into(),
-            arguments: args,
-        }
+        ToolCall { id: id.into(), name: name.into(), arguments: args }
     }
 
-    // ── Tests ───────────────────────────────────────────────
-
-    // 1. Basic flow: returns text response when no tool calls
+    // ══════════════════════════════════════════════════════════
+    //  Existing tests (preserved)
+    // ══════════════════════════════════════════════════════════
 
     #[tokio::test]
     async fn basic_flow_returns_text_when_no_tool_calls() {
         let provider = Arc::new(MockProvider::new(vec![
-            ChatResponse {
-                text: "Hello!".into(),
-                tool_calls: vec![],
-                thinking: None,
-                usage: None,
-            },
+            ChatResponse { text: "Hello!".into(), tool_calls: vec![], thinking: None, usage: None },
         ]));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-1");
         let result = agent.process_message("hi", &mut session, None).await.unwrap();
-
         assert_eq!(result.text, "Hello!");
         assert!(result.tools_used.is_empty());
         assert_eq!(result.iterations, 1);
     }
 
-    // 2. Basic flow: executes tool calls and returns final text
-
     #[tokio::test]
     async fn basic_flow_executes_tool_calls_and_returns_text() {
         let provider = Arc::new(MockProvider::new(vec![
-            ChatResponse {
-                text: "".into(),
-                tool_calls: vec![make_tool_call("tc-1", "echo", serde_json::json!({"text": "world"}))],
-                thinking: None,
-                usage: None,
-            },
-            ChatResponse {
-                text: "Got echo result.".into(),
-                tool_calls: vec![],
-                thinking: None,
-                usage: None,
-            },
+            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-1", "echo", serde_json::json!({"text": "world"}))], thinking: None, usage: None },
+            ChatResponse { text: "Got echo result.".into(), tool_calls: vec![], thinking: None, usage: None },
         ]));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-2");
         let result = agent.process_message("echo test", &mut session, None).await.unwrap();
-
         assert_eq!(result.text, "Got echo result.");
         assert!(result.tools_used.contains(&"echo".to_string()));
         assert_eq!(result.iterations, 2);
     }
 
-    // 3. Doom loop detection — all errors: stops after 3 consecutive all-error rounds
-
     #[tokio::test]
     async fn doom_loop_stops_after_consecutive_errors() {
-        // "failing_tool" is not registered, so execute returns Err → all_errors stays true
         let provider = Arc::new(MockProvider::new(vec![
-            ChatResponse {
-                text: "".into(),
-                tool_calls: vec![make_tool_call("tc-1", "failing_tool", serde_json::json!({}))],
-                thinking: None,
-                usage: None,
-            },
-            ChatResponse {
-                text: "".into(),
-                tool_calls: vec![make_tool_call("tc-2", "failing_tool", serde_json::json!({}))],
-                thinking: None,
-                usage: None,
-            },
-            ChatResponse {
-                text: "".into(),
-                tool_calls: vec![make_tool_call("tc-3", "failing_tool", serde_json::json!({}))],
-                thinking: None,
-                usage: None,
-            },
-            ChatResponse {
-                text: "should not reach here".into(),
-                tool_calls: vec![],
-                thinking: None,
-                usage: None,
-            },
+            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-1", "failing_tool", serde_json::json!({}))], thinking: None, usage: None },
+            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-2", "failing_tool", serde_json::json!({}))], thinking: None, usage: None },
+            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-3", "failing_tool", serde_json::json!({}))], thinking: None, usage: None },
+            ChatResponse { text: "should not reach here".into(), tool_calls: vec![], thinking: None, usage: None },
         ]));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-doom");
         let result = agent.process_message("do something", &mut session, None).await.unwrap();
-
-        // The doom loop message from the Rust implementation
         assert!(result.text.contains("repeated errors"), "Expected doom loop message, got: {}", result.text);
     }
 
-    // 4. Doom loop detection — repetition: stops after 5 identical tool calls
-
     #[tokio::test]
     async fn repetition_detection_stops_identical_calls() {
-        // Provide 8 identical tool call responses to ensure doom loop eventually fires.
-        // Repetition detection triggers at the 5th identical call (iter 5), then
-        // consecutive_errors accumulates since all_errors stays true after the inner break.
-        // After 3 consecutive all-error rounds (iters 5, 6, 7), doom loop fires.
         let mut responses: Vec<ChatResponse> = Vec::new();
         for i in 0..8 {
-            responses.push(ChatResponse {
-                text: "".into(),
-                tool_calls: vec![make_tool_call(&format!("tc-{i}"), "echo", serde_json::json!({"text": "same"}))],
-                thinking: None,
-                usage: None,
-            });
+            responses.push(ChatResponse { text: "".into(), tool_calls: vec![make_tool_call(&format!("tc-{i}"), "echo", serde_json::json!({"text": "same"}))], thinking: None, usage: None });
         }
-        responses.push(ChatResponse {
-            text: "should not reach here".into(),
-            tool_calls: vec![],
-            thinking: None,
-            usage: None,
-        });
-
+        responses.push(ChatResponse { text: "should not reach here".into(), tool_calls: vec![], thinking: None, usage: None });
         let provider = Arc::new(MockProvider::new(responses));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-repetition");
         let result = agent.process_message("repeat", &mut session, None).await.unwrap();
-
-        // After repetition detection triggers (iter 5), the agent continues but
-        // all_errors stays true. After 3 consecutive error rounds, doom loop fires.
-        // The final last_text is the doom loop message.
-        assert!(
-            result.text.contains("repeated") || result.text.contains("Stopping"),
-            "Expected repetition or doom loop message, got: {}",
-            result.text
-        );
+        assert!(result.text.contains("repeated") || result.text.contains("Stopping"), "Expected repetition or doom loop message, got: {}", result.text);
     }
-
-    // 5. Doom loop detection — repetition: does not trigger for different tool calls
 
     #[tokio::test]
     async fn no_repetition_for_different_tool_calls() {
         let provider = Arc::new(MockProvider::new(vec![
-            ChatResponse {
-                text: "".into(),
-                tool_calls: vec![make_tool_call("tc-1", "echo", serde_json::json!({"text": "a"}))],
-                thinking: None,
-                usage: None,
-            },
-            ChatResponse {
-                text: "".into(),
-                tool_calls: vec![make_tool_call("tc-2", "echo", serde_json::json!({"text": "b"}))],
-                thinking: None,
-                usage: None,
-            },
-            ChatResponse {
-                text: "".into(),
-                tool_calls: vec![make_tool_call("tc-3", "echo", serde_json::json!({"text": "c"}))],
-                thinking: None,
-                usage: None,
-            },
-            ChatResponse {
-                text: "".into(),
-                tool_calls: vec![make_tool_call("tc-4", "echo", serde_json::json!({"text": "d"}))],
-                thinking: None,
-                usage: None,
-            },
-            ChatResponse {
-                text: "".into(),
-                tool_calls: vec![make_tool_call("tc-5", "echo", serde_json::json!({"text": "e"}))],
-                thinking: None,
-                usage: None,
-            },
-            ChatResponse {
-                text: "All done.".into(),
-                tool_calls: vec![],
-                thinking: None,
-                usage: None,
-            },
+            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-1", "echo", serde_json::json!({"text": "a"}))], thinking: None, usage: None },
+            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-2", "echo", serde_json::json!({"text": "b"}))], thinking: None, usage: None },
+            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-3", "echo", serde_json::json!({"text": "c"}))], thinking: None, usage: None },
+            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-4", "echo", serde_json::json!({"text": "d"}))], thinking: None, usage: None },
+            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-5", "echo", serde_json::json!({"text": "e"}))], thinking: None, usage: None },
+            ChatResponse { text: "All done.".into(), tool_calls: vec![], thinking: None, usage: None },
         ]));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-different");
         let result = agent.process_message("various", &mut session, None).await.unwrap();
-
         assert_eq!(result.text, "All done.");
-        assert!(!result.text.contains("Stopping"));
-        assert!(!result.text.contains("repeated errors"));
     }
-
-    // 6. Error handling: returns error on provider failure
 
     #[tokio::test]
     async fn returns_error_on_provider_failure() {
-        let provider = Arc::new(FailingProvider);
-        let agent = create_agent(provider, None);
+        let agent = create_agent(Arc::new(FailingProvider), None);
         let mut session = Session::new("test-error");
         let result = agent.process_message("fail", &mut session, None).await;
-
-        // The Rust agent returns Err on provider failure
         assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.contains("Network down"), "Expected network error, got: {}", err);
+        assert!(result.unwrap_err().contains("Network down"));
     }
-
-    // 7. Error handling: handles unknown tool gracefully
 
     #[tokio::test]
     async fn handles_unknown_tool_gracefully() {
         let provider = Arc::new(MockProvider::new(vec![
-            ChatResponse {
-                text: "".into(),
-                tool_calls: vec![make_tool_call("tc-unknown", "nonexistent_tool", serde_json::json!({}))],
-                thinking: None,
-                usage: None,
-            },
-            ChatResponse {
-                text: "Recovered.".into(),
-                tool_calls: vec![],
-                thinking: None,
-                usage: None,
-            },
+            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-x", "nonexistent_tool", serde_json::json!({}))], thinking: None, usage: None },
+            ChatResponse { text: "Recovered.".into(), tool_calls: vec![], thinking: None, usage: None },
         ]));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-unknown-tool");
         let result = agent.process_message("use unknown", &mut session, None).await.unwrap();
-
-        // Agent should recover — unknown tool returns error, agent continues
         assert_eq!(result.text, "Recovered.");
     }
 
-    // 8. Max iterations: stops at max iterations
-
     #[tokio::test]
     async fn stops_at_max_iterations() {
-        // Always return tool calls with different args to avoid repetition detection
         let mut responses: Vec<ChatResponse> = Vec::new();
         for i in 0..15 {
-            responses.push(ChatResponse {
-                text: "".into(),
-                tool_calls: vec![make_tool_call(&format!("tc-{i}"), "echo", serde_json::json!({"text": format!("iter-{i}")}))],
-                thinking: None,
-                usage: None,
-            });
+            responses.push(ChatResponse { text: "".into(), tool_calls: vec![make_tool_call(&format!("tc-{i}"), "echo", serde_json::json!({"text": format!("iter-{i}")}))], thinking: None, usage: None });
         }
-
         let provider = Arc::new(MockProvider::new(responses));
         let tools = create_tools();
         let agent = PrismerAgent::new(
-            provider,
-            Arc::new(tools),
-            Arc::new(EventBus::default()),
-            "Test.".into(),
-            "test-model".into(),
-            "researcher".into(),
-            "/tmp".into(),
-        ).with_options(AgentOptions {
-            max_iterations: 5,
-            ..AgentOptions::default()
-        });
-
+            provider, Arc::new(tools), Arc::new(EventBus::default()),
+            "Test.".into(), "test-model".into(), "researcher".into(), "/tmp".into(),
+        ).with_options(AgentOptions { max_iterations: 5, ..AgentOptions::default() });
         let mut session = Session::new("test-max-iter");
         let result = agent.process_message("loop forever", &mut session, None).await.unwrap();
-
-        // Should stop at or before max iterations (5)
         assert!(result.iterations <= 5, "Expected <= 5 iterations, got {}", result.iterations);
     }
-
-    // 9. Thinking model support: preserves thinking/reasoning in result
 
     #[tokio::test]
     async fn preserves_thinking_in_result() {
         let provider = Arc::new(MockProvider::new(vec![
-            ChatResponse {
-                text: "Answer.".into(),
-                tool_calls: vec![],
-                thinking: Some("I need to think about this...".into()),
-                usage: None,
-            },
+            ChatResponse { text: "Answer.".into(), tool_calls: vec![], thinking: Some("I need to think about this...".into()), usage: None },
         ]));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-thinking");
         let result = agent.process_message("think hard", &mut session, None).await.unwrap();
-
         assert_eq!(result.text, "Answer.");
         assert_eq!(result.thinking.as_deref(), Some("I need to think about this..."));
     }
 
-    // 10. Thinking model support: stores reasoning in assistant messages
-
     #[tokio::test]
     async fn stores_reasoning_in_assistant_messages() {
         let provider = Arc::new(MockProvider::new(vec![
-            ChatResponse {
-                text: "".into(),
-                tool_calls: vec![make_tool_call("tc-1", "echo", serde_json::json!({"text": "test"}))],
-                thinking: Some("Let me use a tool.".into()),
-                usage: None,
-            },
-            ChatResponse {
-                text: "Done.".into(),
-                tool_calls: vec![],
-                thinking: Some("Tool worked.".into()),
-                usage: None,
-            },
+            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-1", "echo", serde_json::json!({"text": "test"}))], thinking: Some("Let me use a tool.".into()), usage: None },
+            ChatResponse { text: "Done.".into(), tool_calls: vec![], thinking: Some("Tool worked.".into()), usage: None },
         ]));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-reasoning-roundtrip");
         let _result = agent.process_message("reason and act", &mut session, None).await.unwrap();
-
-        // Check that the assistant message with tool calls has reasoning_content
-        let assistant_msgs: Vec<&Message> = session.messages.iter()
-            .filter(|m| m.role == "assistant")
-            .collect();
-
-        // First assistant message should have reasoning_content from tool call response
-        assert!(assistant_msgs.len() >= 1, "Expected at least 1 assistant message");
-        assert_eq!(
-            assistant_msgs[0].reasoning_content.as_deref(),
-            Some("Let me use a tool."),
-            "First assistant message should preserve reasoning"
-        );
+        let assistant_msgs: Vec<&Message> = session.messages.iter().filter(|m| m.role == "assistant").collect();
+        assert!(assistant_msgs.len() >= 1);
+        assert_eq!(assistant_msgs[0].reasoning_content.as_deref(), Some("Let me use a tool."));
     }
-
-    // 11. Tool result compaction: compacts tool output exceeding max_tool_result_chars
 
     #[tokio::test]
     async fn compacts_oversized_tool_output() {
         let provider = Arc::new(MockProvider::new(vec![
-            ChatResponse {
-                text: "".into(),
-                tool_calls: vec![make_tool_call("tc-big", "big_output", serde_json::json!({}))],
-                thinking: None,
-                usage: None,
-            },
-            ChatResponse {
-                text: "Processed.".into(),
-                tool_calls: vec![],
-                thinking: None,
-                usage: None,
-            },
+            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-big", "big_output", serde_json::json!({}))], thinking: None, usage: None },
+            ChatResponse { text: "Processed.".into(), tool_calls: vec![], thinking: None, usage: None },
         ]));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-compact");
         let result = agent.process_message("get big data", &mut session, None).await.unwrap();
-
-        // Find the tool result message in session
-        let tool_msg = session.messages.iter().find(|m| m.role == "tool");
-        assert!(tool_msg.is_some(), "Expected a tool result message in session");
-
-        let tool_content = tool_msg.unwrap().content.as_deref().unwrap();
-        // 200K output exceeds 140K limit, should be truncated
-        assert!(tool_content.len() < 200_000, "Tool result should be compacted");
-        assert!(tool_content.contains("truncated"), "Compacted result should contain truncation marker");
+        let tool_msg = session.messages.iter().find(|m| m.role == "tool").unwrap();
+        let tool_content = tool_msg.text_content().unwrap();
+        assert!(tool_content.len() < 200_000);
+        assert!(tool_content.contains("truncated"));
         assert_eq!(result.text, "Processed.");
     }
-
-    // 12. Tool result compaction: does not compact small tool outputs
 
     #[tokio::test]
     async fn does_not_compact_small_tool_outputs() {
         let provider = Arc::new(MockProvider::new(vec![
-            ChatResponse {
-                text: "".into(),
-                tool_calls: vec![make_tool_call("tc-small", "echo", serde_json::json!({"text": "hello"}))],
-                thinking: None,
-                usage: None,
-            },
-            ChatResponse {
-                text: "ok".into(),
-                tool_calls: vec![],
-                thinking: None,
-                usage: None,
-            },
+            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-small", "echo", serde_json::json!({"text": "hello"}))], thinking: None, usage: None },
+            ChatResponse { text: "ok".into(), tool_calls: vec![], thinking: None, usage: None },
         ]));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-no-compact");
         let _result = agent.process_message("echo", &mut session, None).await.unwrap();
-
-        let tool_msg = session.messages.iter().find(|m| m.role == "tool");
-        assert!(tool_msg.is_some(), "Expected a tool result message");
-
-        let content = tool_msg.unwrap().content.as_deref().unwrap();
-        assert_eq!(content, "Echo: hello");
-        assert!(!content.contains("truncated"));
+        let tool_msg = session.messages.iter().find(|m| m.role == "tool").unwrap();
+        assert_eq!(tool_msg.text_content().unwrap(), "Echo: hello");
     }
-
-    // 13. Usage tracking: accumulates token usage across iterations
 
     #[tokio::test]
     async fn accumulates_token_usage_across_iterations() {
         let provider = Arc::new(MockProvider::new(vec![
-            ChatResponse {
-                text: "".into(),
-                tool_calls: vec![make_tool_call("tc-1", "echo", serde_json::json!({"text": "a"}))],
-                thinking: None,
-                usage: Some(Usage { prompt_tokens: 100, completion_tokens: 50 }),
-            },
-            ChatResponse {
-                text: "Done.".into(),
-                tool_calls: vec![],
-                thinking: None,
-                usage: Some(Usage { prompt_tokens: 200, completion_tokens: 80 }),
-            },
+            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-1", "echo", serde_json::json!({"text": "a"}))], thinking: None, usage: Some(Usage { prompt_tokens: 100, completion_tokens: 50 }) },
+            ChatResponse { text: "Done.".into(), tool_calls: vec![], thinking: None, usage: Some(Usage { prompt_tokens: 200, completion_tokens: 80 }) },
         ]));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-usage");
         let result = agent.process_message("track usage", &mut session, None).await.unwrap();
-
-        let usage = result.usage.expect("Expected usage to be present");
+        let usage = result.usage.unwrap();
         assert_eq!(usage.prompt_tokens, 300);
         assert_eq!(usage.completion_tokens, 130);
+    }
+
+    // ══════════════════════════════════════════════════════════
+    //  NEW: Approval gate tests
+    // ══════════════════════════════════════════════════════════
+
+    #[test]
+    fn needs_approval_returns_true_for_bash_with_rm_rf() {
+        let agent = create_agent(Arc::new(MockProvider::new(vec![])), None);
+        assert!(agent.needs_approval("bash", &serde_json::json!({"command": "rm -rf /tmp/data"})));
+    }
+
+    #[test]
+    fn needs_approval_returns_true_for_bash_with_mv() {
+        let agent = create_agent(Arc::new(MockProvider::new(vec![])), None);
+        assert!(agent.needs_approval("bash", &serde_json::json!({"command": "mv /important/file /dev/null"})));
+    }
+
+    #[test]
+    fn needs_approval_returns_true_for_bash_with_chmod() {
+        let agent = create_agent(Arc::new(MockProvider::new(vec![])), None);
+        assert!(agent.needs_approval("bash", &serde_json::json!({"command": "chmod 777 /etc/passwd"})));
+    }
+
+    #[test]
+    fn needs_approval_returns_true_for_bash_with_kill() {
+        let agent = create_agent(Arc::new(MockProvider::new(vec![])), None);
+        assert!(agent.needs_approval("bash", &serde_json::json!({"command": "kill -9 1234"})));
+    }
+
+    #[test]
+    fn needs_approval_returns_false_for_bash_with_safe_command() {
+        let agent = create_agent(Arc::new(MockProvider::new(vec![])), None);
+        assert!(!agent.needs_approval("bash", &serde_json::json!({"command": "echo hello"})));
+    }
+
+    #[test]
+    fn needs_approval_returns_false_for_bash_with_ls() {
+        let agent = create_agent(Arc::new(MockProvider::new(vec![])), None);
+        assert!(!agent.needs_approval("bash", &serde_json::json!({"command": "ls -la /tmp"})));
+    }
+
+    #[test]
+    fn needs_approval_returns_false_for_echo_tool() {
+        let agent = create_agent(Arc::new(MockProvider::new(vec![])), None);
+        // "echo" is not in sensitive_tools, so always false
+        assert!(!agent.needs_approval("echo", &serde_json::json!({"text": "rm -rf /"})));
+    }
+
+    #[test]
+    fn needs_approval_returns_false_for_non_sensitive_tool() {
+        let agent = create_agent(Arc::new(MockProvider::new(vec![])), None);
+        assert!(!agent.needs_approval("read_file", &serde_json::json!({})));
+    }
+
+    #[test]
+    fn needs_approval_uses_cmd_field_as_fallback() {
+        let agent = create_agent(Arc::new(MockProvider::new(vec![])), None);
+        // TS code checks args.command || args.cmd
+        assert!(agent.needs_approval("bash", &serde_json::json!({"cmd": "rm -rf /data"})));
+    }
+
+    #[tokio::test]
+    async fn approval_times_out_to_false() {
+        let agent = PrismerAgent::new(
+            Arc::new(MockProvider::new(vec![])), Arc::new(create_tools()), Arc::new(EventBus::default()),
+            "Test.".into(), "test-model".into(), "researcher".into(), "/tmp".into(),
+        ).with_options(AgentOptions { approval_timeout_ms: 100, ..AgentOptions::default() });
+
+        assert!(!agent.wait_for_approval("timeout-tool").await, "Approval should time out to false");
+    }
+
+    #[tokio::test]
+    async fn resolve_approval_approves_waiting_tool() {
+        let agent = Arc::new(PrismerAgent::new(
+            Arc::new(MockProvider::new(vec![])), Arc::new(create_tools()), Arc::new(EventBus::default()),
+            "Test.".into(), "test-model".into(), "researcher".into(), "/tmp".into(),
+        ).with_options(AgentOptions { approval_timeout_ms: 5_000, ..AgentOptions::default() }));
+
+        let agent_clone = agent.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            agent_clone.resolve_approval("tool-approve", true);
+        });
+
+        assert!(agent.wait_for_approval("tool-approve").await);
+    }
+
+    #[tokio::test]
+    async fn resolve_approval_rejects_waiting_tool() {
+        let agent = Arc::new(PrismerAgent::new(
+            Arc::new(MockProvider::new(vec![])), Arc::new(create_tools()), Arc::new(EventBus::default()),
+            "Test.".into(), "test-model".into(), "researcher".into(), "/tmp".into(),
+        ).with_options(AgentOptions { approval_timeout_ms: 5_000, ..AgentOptions::default() }));
+
+        let agent_clone = agent.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            agent_clone.resolve_approval("tool-reject", false);
+        });
+
+        assert!(!agent.wait_for_approval("tool-reject").await);
+    }
+
+    // ══════════════════════════════════════════════════════════
+    //  NEW: Sub-agent delegation tests
+    // ══════════════════════════════════════════════════════════
+
+    #[test]
+    fn resolve_from_mention_creates_child_session() {
+        let mut agents = AgentRegistry::new();
+        agents.register_many(builtin_agents());
+
+        let result = agents.resolve_from_mention("@latex-expert compile this paper");
+        assert!(result.is_some());
+        let (agent_id, message) = result.unwrap();
+        assert_eq!(agent_id, "latex-expert");
+        assert_eq!(message, "compile this paper");
+
+        let parent = Session::new("parent-sess");
+        let child = parent.create_child(agent_id);
+        assert!(child.id.contains("parent-sess"));
+        assert!(child.id.contains("latex-expert"));
+        assert_eq!(child.parent_id.as_deref(), Some("parent-sess"));
+    }
+
+    #[tokio::test]
+    async fn delegate_to_sub_agent_returns_result() {
+        let provider = Arc::new(MockProvider::new(vec![
+            ChatResponse { text: "Compiled successfully.".into(), tool_calls: vec![], thinking: None, usage: None },
+        ]));
+        let mut agents = AgentRegistry::new();
+        agents.register(AgentConfig {
+            id: "latex-expert".into(), name: "LaTeX Expert".into(), mode: AgentMode::Subagent,
+            system_prompt: "You are a LaTeX expert.".into(), model: None, tools: None, max_iterations: Some(10),
+        });
+        let agent = PrismerAgent::new(
+            provider, Arc::new(create_tools()), Arc::new(EventBus::default()),
+            "Primary agent.".into(), "test-model".into(), "researcher".into(), "/tmp".into(),
+        ).with_agents(Arc::new(agents));
+
+        let session = Session::new("parent");
+        let result = agent.delegate_to_sub_agent("latex-expert", "compile this", &session).await.unwrap();
+        assert_eq!(result.text, "Compiled successfully.");
+    }
+
+    #[tokio::test]
+    async fn delegate_to_unknown_agent_returns_error() {
+        let agent = PrismerAgent::new(
+            Arc::new(MockProvider::new(vec![])), Arc::new(create_tools()), Arc::new(EventBus::default()),
+            "Primary.".into(), "test-model".into(), "researcher".into(), "/tmp".into(),
+        ).with_agents(Arc::new(AgentRegistry::new()));
+
+        let session = Session::new("parent");
+        let result = agent.delegate_to_sub_agent("nonexistent", "do something", &session).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Unknown sub-agent"));
+    }
+
+    #[tokio::test]
+    async fn mention_triggers_delegation() {
+        let provider = Arc::new(MockProvider::new(vec![
+            ChatResponse { text: "LaTeX compiled.".into(), tool_calls: vec![], thinking: None, usage: None },
+        ]));
+        let mut agents = AgentRegistry::new();
+        agents.register(AgentConfig {
+            id: "latex-expert".into(), name: "LaTeX Expert".into(), mode: AgentMode::Subagent,
+            system_prompt: "You are a LaTeX expert.".into(), model: None, tools: None, max_iterations: Some(10),
+        });
+        let agent = PrismerAgent::new(
+            provider, Arc::new(create_tools()), Arc::new(EventBus::default()),
+            "Primary agent.".into(), "test-model".into(), "researcher".into(), "/tmp".into(),
+        ).with_agents(Arc::new(agents));
+
+        let mut session = Session::new("test-mention");
+        let result = agent.process_message("@latex-expert compile this", &mut session, None).await.unwrap();
+        assert_eq!(result.text, "LaTeX compiled.");
+    }
+
+    // ══════════════════════════════════════════════════════════
+    //  NEW: Directive file scanning tests
+    // ══════════════════════════════════════════════════════════
+
+    #[test]
+    fn snapshot_directive_files_returns_empty_for_nonexistent_dir() {
+        let agent = create_agent(Arc::new(MockProvider::new(vec![])), None);
+        assert!(agent.snapshot_directive_files().is_empty());
+    }
+
+    #[test]
+    fn scan_directive_files_processes_json_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let directive_dir = dir.path().join(".openclaw/directives");
+        std::fs::create_dir_all(&directive_dir).unwrap();
+        std::fs::write(
+            directive_dir.join("test-directive.json"),
+            serde_json::to_string(&serde_json::json!({
+                "type": "UPDATE_CONTENT", "payload": {"text": "hello"}, "timestamp": "2026-03-24T00:00:00Z"
+            })).unwrap(),
+        ).unwrap();
+
+        let agent = PrismerAgent::new(
+            Arc::new(MockProvider::new(vec![])), Arc::new(create_tools()), Arc::new(EventBus::default()),
+            "Test.".into(), "test-model".into(), "researcher".into(), dir.path().to_string_lossy().to_string(),
+        );
+
+        let mut directives = Vec::new();
+        agent.scan_directive_files(&mut directives, &HashSet::new());
+
+        assert_eq!(directives.len(), 1);
+        assert_eq!(directives[0].r#type, "UPDATE_CONTENT");
+        assert_eq!(directives[0].payload["text"], "hello");
+        assert!(!directive_dir.join("test-directive.json").exists()); // deleted
+    }
+
+    #[test]
+    fn scan_directive_files_skips_known_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let directive_dir = dir.path().join(".openclaw/directives");
+        std::fs::create_dir_all(&directive_dir).unwrap();
+        std::fs::write(
+            directive_dir.join("known.json"),
+            serde_json::to_string(&serde_json::json!({"type": "NOTIFICATION", "payload": {"msg": "test"}})).unwrap(),
+        ).unwrap();
+
+        let agent = PrismerAgent::new(
+            Arc::new(MockProvider::new(vec![])), Arc::new(create_tools()), Arc::new(EventBus::default()),
+            "Test.".into(), "test-model".into(), "researcher".into(), dir.path().to_string_lossy().to_string(),
+        );
+
+        let mut directives = Vec::new();
+        let mut known = HashSet::new();
+        known.insert("known.json".to_string());
+        agent.scan_directive_files(&mut directives, &known);
+
+        assert!(directives.is_empty());
+        assert!(directive_dir.join("known.json").exists()); // not deleted
+    }
+
+    #[test]
+    fn scan_directive_files_skips_malformed_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let directive_dir = dir.path().join(".openclaw/directives");
+        std::fs::create_dir_all(&directive_dir).unwrap();
+        std::fs::write(directive_dir.join("bad.json"), "not json at all").unwrap();
+
+        let agent = PrismerAgent::new(
+            Arc::new(MockProvider::new(vec![])), Arc::new(create_tools()), Arc::new(EventBus::default()),
+            "Test.".into(), "test-model".into(), "researcher".into(), dir.path().to_string_lossy().to_string(),
+        );
+
+        let mut directives = Vec::new();
+        agent.scan_directive_files(&mut directives, &HashSet::new());
+        assert!(directives.is_empty());
     }
 }

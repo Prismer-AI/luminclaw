@@ -49,6 +49,13 @@ impl Session {
         msgs
     }
 
+    /// Remove all messages from the session (for recovery after corruption).
+    pub fn clear_history(&mut self) {
+        self.messages.clear();
+        self.compaction_summary = None;
+        self.last_activity = now_ms();
+    }
+
     /// Create a child session for sub-agent delegation.
     pub fn create_child(&self, sub_agent_id: &str) -> Session {
         let child_id = format!("{}:{}:{}", self.id, sub_agent_id, now_ms());
@@ -81,6 +88,33 @@ impl SessionStore {
 
     pub fn update(&self, session: Session) {
         self.sessions.insert(session.id.clone(), session);
+    }
+
+    pub fn delete(&self, id: &str) {
+        self.sessions.remove(id);
+    }
+
+    /// Remove sessions that have been idle longer than `max_idle_ms`.
+    /// Returns the number of sessions removed.
+    /// This can be called periodically (e.g. from a timer) to garbage-collect
+    /// stale sessions — mirrors TS `SessionStore.startCleanup(maxIdleMs)`.
+    pub fn cleanup_idle(&self, max_idle_ms: u64) -> usize {
+        let now = now_ms();
+        let mut removed = 0;
+        self.sessions.retain(|_key, session| {
+            let idle = now.saturating_sub(session.last_activity);
+            if idle > max_idle_ms {
+                removed += 1;
+                false
+            } else {
+                true
+            }
+        });
+        removed
+    }
+
+    pub fn size(&self) -> usize {
+        self.sessions.len()
     }
 }
 
@@ -122,7 +156,7 @@ mod tests {
 
         assert_eq!(s.messages.len(), 1);
         assert_eq!(s.messages[0].role, "user");
-        assert_eq!(s.messages[0].content.as_deref(), Some("hello"));
+        assert_eq!(s.messages[0].text_content(), Some("hello"));
         assert!(s.last_activity >= before);
     }
 
@@ -134,9 +168,9 @@ mod tests {
         s.add_message(Message::user("third"));
 
         assert_eq!(s.messages.len(), 3);
-        assert_eq!(s.messages[0].content.as_deref(), Some("first"));
-        assert_eq!(s.messages[1].content.as_deref(), Some("second"));
-        assert_eq!(s.messages[2].content.as_deref(), Some("third"));
+        assert_eq!(s.messages[0].text_content(), Some("first"));
+        assert_eq!(s.messages[1].text_content(), Some("second"));
+        assert_eq!(s.messages[2].text_content(), Some("third"));
     }
 
     // ── build_messages ──
@@ -148,7 +182,7 @@ mod tests {
 
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].role, "system");
-        assert_eq!(msgs[0].content.as_deref(), Some("You are an assistant."));
+        assert_eq!(msgs[0].text_content(), Some("You are an assistant."));
     }
 
     #[test]
@@ -162,9 +196,9 @@ mod tests {
         assert_eq!(msgs.len(), 3); // system + 2 history
         assert_eq!(msgs[0].role, "system");
         assert_eq!(msgs[1].role, "user");
-        assert_eq!(msgs[1].content.as_deref(), Some("what is AI?"));
+        assert_eq!(msgs[1].text_content(), Some("what is AI?"));
         assert_eq!(msgs[2].role, "assistant");
-        assert_eq!(msgs[2].content.as_deref(), Some("AI is artificial intelligence."));
+        assert_eq!(msgs[2].text_content(), Some("AI is artificial intelligence."));
     }
 
     #[test]
@@ -179,12 +213,12 @@ mod tests {
         assert_eq!(msgs.len(), 4);
         assert_eq!(msgs[0].role, "system");
         assert_eq!(msgs[1].role, "user");
-        assert!(msgs[1].content.as_deref().unwrap().contains("[Previous conversation summary]"));
-        assert!(msgs[1].content.as_deref().unwrap().contains("Previous discussion about machine learning."));
+        assert!(msgs[1].text_content().unwrap().contains("[Previous conversation summary]"));
+        assert!(msgs[1].text_content().unwrap().contains("Previous discussion about machine learning."));
         assert_eq!(msgs[2].role, "assistant");
-        assert!(msgs[2].content.as_deref().unwrap().contains("Understood"));
+        assert!(msgs[2].text_content().unwrap().contains("Understood"));
         assert_eq!(msgs[3].role, "user");
-        assert_eq!(msgs[3].content.as_deref(), Some("continue"));
+        assert_eq!(msgs[3].text_content(), Some("continue"));
     }
 
     #[test]
@@ -212,10 +246,10 @@ mod tests {
 
         // Should inherit last 4 of 5 messages
         assert_eq!(child.messages.len(), 4);
-        assert_eq!(child.messages[0].content.as_deref(), Some("resp1"));
-        assert_eq!(child.messages[1].content.as_deref(), Some("msg2"));
-        assert_eq!(child.messages[2].content.as_deref(), Some("resp2"));
-        assert_eq!(child.messages[3].content.as_deref(), Some("msg3"));
+        assert_eq!(child.messages[0].text_content(), Some("resp1"));
+        assert_eq!(child.messages[1].text_content(), Some("msg2"));
+        assert_eq!(child.messages[2].text_content(), Some("resp2"));
+        assert_eq!(child.messages[3].text_content(), Some("msg3"));
     }
 
     #[test]
@@ -242,7 +276,7 @@ mod tests {
 
         let child = parent.create_child("summarizer");
         assert_eq!(child.messages.len(), 1);
-        assert_eq!(child.messages[0].content.as_deref(), Some("only one"));
+        assert_eq!(child.messages[0].text_content(), Some("only one"));
     }
 
     #[test]
@@ -275,7 +309,7 @@ mod tests {
         // Retrieve — should find the existing one with the message
         let s2 = store.get_or_create("s1");
         assert_eq!(s2.messages.len(), 1);
-        assert_eq!(s2.messages[0].content.as_deref(), Some("hello"));
+        assert_eq!(s2.messages[0].text_content(), Some("hello"));
     }
 
     #[test]
@@ -327,21 +361,21 @@ mod tests {
 
         // Expected order: system, compaction user, compaction assistant, history...
         assert_eq!(msgs[0].role, "system");
-        assert_eq!(msgs[0].content.as_deref().unwrap(), "You are a helpful assistant.");
+        assert_eq!(msgs[0].text_content().unwrap(), "You are a helpful assistant.");
 
         assert_eq!(msgs[1].role, "user");
-        assert!(msgs[1].content.as_deref().unwrap().contains("[Previous conversation summary]"));
-        assert!(msgs[1].content.as_deref().unwrap().contains("Summary of earlier conversation."));
+        assert!(msgs[1].text_content().unwrap().contains("[Previous conversation summary]"));
+        assert!(msgs[1].text_content().unwrap().contains("Summary of earlier conversation."));
 
         assert_eq!(msgs[2].role, "assistant");
-        assert!(msgs[2].content.as_deref().unwrap().contains("Understood"));
+        assert!(msgs[2].text_content().unwrap().contains("Understood"));
 
         assert_eq!(msgs[3].role, "user");
-        assert_eq!(msgs[3].content.as_deref().unwrap(), "question 1");
+        assert_eq!(msgs[3].text_content().unwrap(), "question 1");
         assert_eq!(msgs[4].role, "assistant");
-        assert_eq!(msgs[4].content.as_deref().unwrap(), "answer 1");
+        assert_eq!(msgs[4].text_content().unwrap(), "answer 1");
         assert_eq!(msgs[5].role, "user");
-        assert_eq!(msgs[5].content.as_deref().unwrap(), "question 2");
+        assert_eq!(msgs[5].text_content().unwrap(), "question 2");
 
         // Total: system + 2 compaction + 3 history = 6
         assert_eq!(msgs.len(), 6);
@@ -364,9 +398,9 @@ mod tests {
         assert_eq!(msgs.len(), 101);
         assert_eq!(msgs[0].role, "system");
         assert_eq!(msgs[1].role, "user");
-        assert_eq!(msgs[1].content.as_deref().unwrap(), "user message 0");
+        assert_eq!(msgs[1].text_content().unwrap(), "user message 0");
         assert_eq!(msgs[100].role, "assistant");
-        assert_eq!(msgs[100].content.as_deref().unwrap(), "assistant reply 99");
+        assert_eq!(msgs[100].text_content().unwrap(), "assistant reply 99");
     }
 
     #[test]
@@ -381,5 +415,72 @@ mod tests {
         assert_eq!(parent.messages.len(), 1);
         // Child has 1 inherited + 1 new
         assert_eq!(child.messages.len(), 2);
+    }
+
+    // ── clear_history ──
+
+    #[test]
+    fn clear_history_removes_all_messages() {
+        let mut s = Session::new("s1");
+        s.add_message(Message::user("hello"));
+        s.add_message(Message::assistant("hi"));
+        s.compaction_summary = Some("summary".into());
+
+        s.clear_history();
+
+        assert!(s.messages.is_empty());
+        assert!(s.compaction_summary.is_none());
+        assert!(s.last_activity > 0);
+    }
+
+    #[test]
+    fn clear_history_on_empty_session() {
+        let mut s = Session::new("s1");
+        s.clear_history();
+        assert!(s.messages.is_empty());
+        assert!(s.compaction_summary.is_none());
+    }
+
+    // ── SessionStore::cleanup_idle ──
+
+    #[test]
+    fn cleanup_idle_removes_old_sessions() {
+        let store = SessionStore::new();
+        let mut s = store.get_or_create("old-session");
+        // Set last_activity to 0 (far in the past)
+        s.last_activity = 0;
+        store.update(s);
+
+        let _ = store.get_or_create("new-session");
+        // new-session has current timestamp
+
+        assert_eq!(store.size(), 2);
+        let removed = store.cleanup_idle(1_000); // 1 second idle max
+        // old-session should be removed, new-session kept
+        assert_eq!(removed, 1);
+        assert_eq!(store.size(), 1);
+    }
+
+    #[test]
+    fn cleanup_idle_keeps_active_sessions() {
+        let store = SessionStore::new();
+        let _ = store.get_or_create("active-1");
+        let _ = store.get_or_create("active-2");
+
+        let removed = store.cleanup_idle(1_800_000); // 30 min
+        assert_eq!(removed, 0);
+        assert_eq!(store.size(), 2);
+    }
+
+    // ── SessionStore::delete + size ──
+
+    #[test]
+    fn session_store_delete() {
+        let store = SessionStore::new();
+        let _ = store.get_or_create("s1");
+        let _ = store.get_or_create("s2");
+        assert_eq!(store.size(), 2);
+        store.delete("s1");
+        assert_eq!(store.size(), 1);
     }
 }

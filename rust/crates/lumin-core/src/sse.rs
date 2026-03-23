@@ -33,6 +33,58 @@ impl Default for EventBus {
     fn default() -> Self { Self::new(1000) }
 }
 
+// ── Stdout SSE Writer ────────────────────────────────────
+
+/// Writes events to stdout in SSE format for IPC streaming.
+/// Used when the agent runs as a subprocess and the host reads stdout.
+/// Mirrors TS `StdoutSSEWriter`.
+pub struct StdoutSseWriter {
+    /// Handle to the spawned task so we can abort it on stop.
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl StdoutSseWriter {
+    /// Subscribe to the given EventBus and spawn a task that writes each event
+    /// to stdout in SSE format: `event: <type>\ndata: <json>\n\n`.
+    pub fn start(bus: &EventBus) -> Self {
+        let mut rx = bus.subscribe();
+        let handle = tokio::spawn(async move {
+            use std::io::Write;
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        let data = serde_json::to_string(&event.data).unwrap_or_default();
+                        let line = format!("event: {}\ndata: {}\n\n", event.event_type, data);
+                        // Write to stdout; ignore errors (pipe broken, etc.)
+                        let _ = std::io::stdout().write_all(line.as_bytes());
+                        let _ = std::io::stdout().flush();
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        // Consumer too slow — log and continue
+                        let msg = format!("event: error\ndata: {{\"message\":\"SSE writer lagged, dropped {} events\"}}\n\n", n);
+                        let _ = std::io::stdout().write_all(msg.as_bytes());
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+        Self { handle: Some(handle) }
+    }
+
+    /// Stop the writer by aborting the background task.
+    pub fn stop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+impl Drop for StdoutSseWriter {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

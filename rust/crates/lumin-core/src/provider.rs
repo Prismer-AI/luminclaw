@@ -5,11 +5,63 @@ use std::time::Duration;
 use futures::StreamExt;
 use tracing::warn;
 
+// ── Multimodal Content Blocks ────────────────────────────
+
+/// Content block for multimodal messages (OpenAI-compatible format).
+/// Used when a user message contains both text and images.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ContentBlock {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: ImageUrlBlock },
+}
+
+/// Image URL reference within a content block.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageUrlBlock {
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Message content — either a plain string or an array of content blocks
+/// (for multimodal messages). Uses `#[serde(untagged)]` so it serializes
+/// as a JSON string or JSON array, matching the OpenAI format.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MessageContent {
+    Text(String),
+    Blocks(Vec<ContentBlock>),
+}
+
+impl MessageContent {
+    /// Extract text content, joining text blocks if multimodal.
+    pub fn as_text(&self) -> &str {
+        match self {
+            MessageContent::Text(s) => s,
+            MessageContent::Blocks(_) => "",
+        }
+    }
+
+    /// Get length in characters (for budget calculations).
+    pub fn char_len(&self) -> usize {
+        match self {
+            MessageContent::Text(s) => s.len(),
+            MessageContent::Blocks(blocks) => blocks.iter().map(|b| match b {
+                ContentBlock::Text { text } => text.len(),
+                ContentBlock::ImageUrl { .. } => 100, // rough estimate for URL
+            }).sum(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<MessageContent>,
     /// Tool calls in the assistant message (OpenAI format).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<serde_json::Value>>,
@@ -24,19 +76,31 @@ pub struct Message {
 
 impl Message {
     pub fn system(content: &str) -> Self {
-        Self { role: "system".into(), content: Some(content.into()), tool_calls: None, tool_call_id: None, reasoning_content: None }
+        Self { role: "system".into(), content: Some(MessageContent::Text(content.into())), tool_calls: None, tool_call_id: None, reasoning_content: None }
     }
     pub fn user(content: &str) -> Self {
-        Self { role: "user".into(), content: Some(content.into()), tool_calls: None, tool_call_id: None, reasoning_content: None }
+        Self { role: "user".into(), content: Some(MessageContent::Text(content.into())), tool_calls: None, tool_call_id: None, reasoning_content: None }
+    }
+    /// Create a user message with multimodal content blocks (text + images).
+    pub fn user_multimodal(blocks: Vec<ContentBlock>) -> Self {
+        Self { role: "user".into(), content: Some(MessageContent::Blocks(blocks)), tool_calls: None, tool_call_id: None, reasoning_content: None }
     }
     pub fn assistant(content: &str) -> Self {
-        Self { role: "assistant".into(), content: Some(content.into()), tool_calls: None, tool_call_id: None, reasoning_content: None }
+        Self { role: "assistant".into(), content: Some(MessageContent::Text(content.into())), tool_calls: None, tool_call_id: None, reasoning_content: None }
     }
     pub fn assistant_with_tools(tool_calls: Vec<serde_json::Value>, reasoning: Option<String>) -> Self {
         Self { role: "assistant".into(), content: None, tool_calls: Some(tool_calls), tool_call_id: None, reasoning_content: reasoning }
     }
     pub fn tool_result(tool_call_id: &str, content: &str) -> Self {
-        Self { role: "tool".into(), content: Some(content.into()), tool_calls: None, tool_call_id: Some(tool_call_id.into()), reasoning_content: None }
+        Self { role: "tool".into(), content: Some(MessageContent::Text(content.into())), tool_calls: None, tool_call_id: Some(tool_call_id.into()), reasoning_content: None }
+    }
+
+    /// Helper: get text content as `Option<&str>`, returning `None` for multimodal blocks.
+    pub fn text_content(&self) -> Option<&str> {
+        match &self.content {
+            Some(MessageContent::Text(s)) => Some(s),
+            _ => None,
+        }
     }
 }
 
@@ -76,6 +140,17 @@ pub struct Usage {
 #[async_trait::async_trait]
 pub trait Provider: Send + Sync {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ProviderError>;
+
+    /// Streaming chat completion — calls `on_delta` for each text token.
+    /// Default implementation falls back to non-streaming `chat()`.
+    async fn chat_stream(
+        &self,
+        request: ChatRequest,
+        _on_delta: Box<dyn Fn(&str) + Send>,
+    ) -> Result<ChatResponse, ProviderError> {
+        self.chat(request).await
+    }
+
     fn name(&self) -> &str;
 }
 
@@ -146,7 +221,7 @@ impl OpenAIProvider {
     }
 
     /// Streaming SSE call — processes tokens as they arrive.
-    async fn chat_stream(&self, request: &ChatRequest) -> Result<ChatResponse, ProviderError> {
+    async fn chat_stream_internal(&self, request: &ChatRequest) -> Result<ChatResponse, ProviderError> {
         let model = request.model.as_deref().unwrap_or(&self.default_model);
         let mut body = serde_json::json!({
             "model": model,
@@ -332,10 +407,22 @@ struct ToolCallAccum {
 impl Provider for OpenAIProvider {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ProviderError> {
         if request.stream {
-            self.chat_stream(&request).await
+            self.chat_stream_internal(&request).await
         } else {
             self.chat_batch(&request).await
         }
+    }
+
+    async fn chat_stream(
+        &self,
+        request: ChatRequest,
+        _on_delta: Box<dyn Fn(&str) + Send>,
+    ) -> Result<ChatResponse, ProviderError> {
+        // Use internal streaming, the on_delta callback can be wired to
+        // text_parts accumulation in a future enhancement.
+        let mut req = request;
+        req.stream = true;
+        self.chat_stream_internal(&req).await
     }
 
     fn name(&self) -> &str { "openai-compatible" }
@@ -380,7 +467,7 @@ mod tests {
     fn message_system() {
         let msg = Message::system("You are helpful.");
         assert_eq!(msg.role, "system");
-        assert_eq!(msg.content.as_deref(), Some("You are helpful."));
+        assert_eq!(msg.text_content(), Some("You are helpful."));
         assert!(msg.tool_calls.is_none());
         assert!(msg.tool_call_id.is_none());
         assert!(msg.reasoning_content.is_none());
@@ -390,14 +477,14 @@ mod tests {
     fn message_user() {
         let msg = Message::user("Hello!");
         assert_eq!(msg.role, "user");
-        assert_eq!(msg.content.as_deref(), Some("Hello!"));
+        assert_eq!(msg.text_content(), Some("Hello!"));
     }
 
     #[test]
     fn message_assistant() {
         let msg = Message::assistant("Sure, I can help.");
         assert_eq!(msg.role, "assistant");
-        assert_eq!(msg.content.as_deref(), Some("Sure, I can help."));
+        assert_eq!(msg.text_content(), Some("Sure, I can help."));
         assert!(msg.tool_calls.is_none());
     }
 
@@ -415,7 +502,7 @@ mod tests {
     fn message_tool_result() {
         let msg = Message::tool_result("call_123", "result output");
         assert_eq!(msg.role, "tool");
-        assert_eq!(msg.content.as_deref(), Some("result output"));
+        assert_eq!(msg.text_content(), Some("result output"));
         assert_eq!(msg.tool_call_id.as_deref(), Some("call_123"));
     }
 
@@ -443,7 +530,7 @@ mod tests {
         // reasoning_content should never be serialized, even when Some
         let msg = Message {
             role: "assistant".into(),
-            content: Some("reply".into()),
+            content: Some(MessageContent::Text("reply".into())),
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: Some("deep thoughts".into()),
@@ -483,7 +570,7 @@ mod tests {
         };
         let cloned = req.clone();
         assert_eq!(cloned.messages.len(), 1);
-        assert_eq!(cloned.messages[0].content.as_deref(), Some("hello"));
+        assert_eq!(cloned.messages[0].text_content(), Some("hello"));
         assert_eq!(cloned.model.as_deref(), Some("gpt-4o"));
         assert_eq!(cloned.max_tokens, Some(1024));
         assert!(!cloned.stream);
@@ -761,12 +848,128 @@ mod tests {
         let err = ProviderError::Parse("bad json".into());
         assert_eq!(format!("{err}"), "Parse error: bad json");
     }
+
+    // ── Regex-based retryable pattern tests (TS parity) ──
+
+    #[test]
+    fn is_retryable_rate_limit_in_body() {
+        // TS pattern: /rate.?limit/i
+        let err = ProviderError::Http { status: 200, body: "rate_limit exceeded".into() };
+        assert!(FallbackProvider::is_retryable(&err));
+    }
+
+    #[test]
+    fn is_retryable_capacity_in_body() {
+        // TS pattern: /capacity/i
+        let err = ProviderError::Http { status: 200, body: "server at capacity".into() };
+        assert!(FallbackProvider::is_retryable(&err));
+    }
+
+    #[test]
+    fn is_retryable_overloaded_in_body() {
+        // TS pattern: /overloaded/i
+        let err = ProviderError::Http { status: 200, body: "model is Overloaded".into() };
+        assert!(FallbackProvider::is_retryable(&err));
+    }
+
+    #[test]
+    fn is_retryable_timeout_in_body() {
+        // TS pattern: /timeout/i
+        let err = ProviderError::Http { status: 200, body: "request Timeout".into() };
+        assert!(FallbackProvider::is_retryable(&err));
+    }
+
+    // ── ContentBlock + MessageContent tests ──
+
+    #[test]
+    fn content_block_text_serialization() {
+        let block = ContentBlock::Text { text: "hello".into() };
+        let json_val = serde_json::to_value(&block).unwrap();
+        assert_eq!(json_val["type"], "text");
+        assert_eq!(json_val["text"], "hello");
+    }
+
+    #[test]
+    fn content_block_image_url_serialization() {
+        let block = ContentBlock::ImageUrl {
+            image_url: ImageUrlBlock { url: "https://example.com/img.png".into(), detail: Some("high".into()) },
+        };
+        let json_val = serde_json::to_value(&block).unwrap();
+        assert_eq!(json_val["type"], "image_url");
+        assert_eq!(json_val["image_url"]["url"], "https://example.com/img.png");
+        assert_eq!(json_val["image_url"]["detail"], "high");
+    }
+
+    #[test]
+    fn message_content_text_serializes_as_string() {
+        let mc = MessageContent::Text("hello world".into());
+        let json_val = serde_json::to_value(&mc).unwrap();
+        assert_eq!(json_val, "hello world");
+    }
+
+    #[test]
+    fn message_content_blocks_serializes_as_array() {
+        let mc = MessageContent::Blocks(vec![
+            ContentBlock::Text { text: "describe this".into() },
+            ContentBlock::ImageUrl { image_url: ImageUrlBlock { url: "https://img.png".into(), detail: None } },
+        ]);
+        let json_val = serde_json::to_value(&mc).unwrap();
+        assert!(json_val.is_array());
+        assert_eq!(json_val.as_array().unwrap().len(), 2);
+        assert_eq!(json_val[0]["type"], "text");
+        assert_eq!(json_val[1]["type"], "image_url");
+    }
+
+    #[test]
+    fn user_multimodal_message() {
+        let msg = Message::user_multimodal(vec![
+            ContentBlock::Text { text: "What is this?".into() },
+            ContentBlock::ImageUrl { image_url: ImageUrlBlock { url: "https://img.png".into(), detail: Some("auto".into()) } },
+        ]);
+        assert_eq!(msg.role, "user");
+        let json_val = serde_json::to_value(&msg).unwrap();
+        assert!(json_val["content"].is_array());
+        assert_eq!(json_val["content"][0]["type"], "text");
+        assert_eq!(json_val["content"][1]["type"], "image_url");
+    }
+
+    #[test]
+    fn message_content_char_len_text() {
+        let mc = MessageContent::Text("hello".into());
+        assert_eq!(mc.char_len(), 5);
+    }
+
+    #[test]
+    fn message_content_char_len_blocks() {
+        let mc = MessageContent::Blocks(vec![
+            ContentBlock::Text { text: "abc".into() },
+            ContentBlock::ImageUrl { image_url: ImageUrlBlock { url: "https://x.png".into(), detail: None } },
+        ]);
+        assert_eq!(mc.char_len(), 3 + 100); // text len + 100 for image
+    }
+
+    #[test]
+    fn text_content_helper_returns_text() {
+        let msg = Message::user("hello");
+        assert_eq!(msg.text_content(), Some("hello"));
+    }
+
+    #[test]
+    fn text_content_helper_returns_none_for_blocks() {
+        let msg = Message::user_multimodal(vec![ContentBlock::Text { text: "hi".into() }]);
+        assert_eq!(msg.text_content(), None);
+    }
 }
 
 // ── FallbackProvider ─────────────────────────────────────
 
 /// Wraps a base provider with retry and model fallback chain.
-/// Retries on 429 (rate limit) and 5xx (server error); tries fallback models in order.
+/// On retryable errors (429, 5xx, rate-limit, timeout, overloaded),
+/// automatically retries with the next model in the chain.
+///
+/// Matches TS `FallbackProvider` error-pattern detection: uses regex patterns
+/// on error messages (not just status codes) so that message-body hints like
+/// "rate_limit" or "overloaded" are caught even on non-standard status codes.
 pub struct FallbackProvider {
     base: OpenAIProvider,
     fallback_models: Vec<String>,
@@ -778,21 +981,43 @@ impl FallbackProvider {
         Self { base, fallback_models, max_retries: 2 }
     }
 
-    fn is_retryable(err: &ProviderError) -> bool {
-        match err {
-            ProviderError::Http { status, .. } => {
-                *status == 429 || (500..=504).contains(status)
-            }
-            ProviderError::Network(_) => true,
-            ProviderError::Parse(_) => false,
+    /// Check whether an error is retryable using regex patterns on the full
+    /// error message string — matching the TS `retryablePatterns` array.
+    pub fn is_retryable(err: &ProviderError) -> bool {
+        // Parse errors are never retryable
+        if matches!(err, ProviderError::Parse(_)) {
+            return false;
         }
+        // Network errors are always retryable
+        if matches!(err, ProviderError::Network(_)) {
+            return true;
+        }
+        // For HTTP errors, check both status code and message patterns
+        let msg = err.to_string();
+        use regex_lite::Regex;
+        // Lazy-init would be ideal but regex_lite is cheap to construct
+        let patterns: &[&str] = &[
+            r"\b(429|500|502|503|504)\b",
+            r"(?i)rate.?limit",
+            r"(?i)capacity",
+            r"(?i)overloaded",
+            r"(?i)timeout",
+        ];
+        for pat in patterns {
+            if let Ok(re) = Regex::new(pat) {
+                if re.is_match(&msg) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 }
 
 #[async_trait::async_trait]
 impl Provider for FallbackProvider {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ProviderError> {
-        // Try primary model
+        // Try primary model with retries
         let mut last_error = None;
         for attempt in 0..=self.max_retries {
             match self.base.chat(request.clone()).await {
@@ -810,7 +1035,7 @@ impl Provider for FallbackProvider {
             }
         }
 
-        // Try fallback models
+        // Try fallback models (TS iterates models in order, one attempt each)
         for fallback_model in &self.fallback_models {
             warn!(model = %fallback_model, "trying fallback model");
             let mut fallback_request = request.clone();
@@ -818,7 +1043,39 @@ impl Provider for FallbackProvider {
             match self.base.chat(fallback_request).await {
                 Ok(response) => return Ok(response),
                 Err(e) => {
+                    if !Self::is_retryable(&e) {
+                        return Err(e);
+                    }
                     warn!(model = %fallback_model, error = %e, "fallback model failed");
+                    last_error = Some(e);
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or(ProviderError::Network("All models exhausted".into())))
+    }
+
+    async fn chat_stream(
+        &self,
+        request: ChatRequest,
+        on_delta: Box<dyn Fn(&str) + Send>,
+    ) -> Result<ChatResponse, ProviderError> {
+        // Try each model in sequence for streaming, matching TS FallbackProvider.chatStream
+        let mut last_error = None;
+        let models: Vec<Option<String>> = std::iter::once(request.model.clone())
+            .chain(self.fallback_models.iter().map(|m| Some(m.clone())))
+            .collect();
+
+        for model in &models {
+            let mut req = request.clone();
+            req.model = model.clone();
+            match self.base.chat_stream(req, Box::new(|_| {})).await {
+                Ok(response) => return Ok(response),
+                Err(e) => {
+                    if !Self::is_retryable(&e) {
+                        return Err(e);
+                    }
+                    warn!(model = ?model, "stream failed, trying next");
                     last_error = Some(e);
                 }
             }

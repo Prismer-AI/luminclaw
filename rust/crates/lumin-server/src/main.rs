@@ -123,6 +123,7 @@ async fn main() {
             let app = Router::new()
                 .route("/health", get(http::health))
                 .route("/", get(http::health))
+                .route("/v1/tools", get(http::list_tools))
                 .route("/v1/chat", post(http::chat))
                 .route("/v1/artifacts", post(http::artifacts))
                 .route("/v1/tasks", get(http::list_tasks))
