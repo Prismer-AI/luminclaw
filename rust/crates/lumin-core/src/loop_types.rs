@@ -24,6 +24,7 @@ pub struct AgentLoopInput {
 #[derive(Debug, Clone)]
 pub struct ImageRef {
     pub url: String,
+    pub path: Option<String>,
     pub mime_type: Option<String>,
 }
 
@@ -94,7 +95,7 @@ mod tests {
         let input = AgentLoopInput {
             content: "Hello".into(),
             session_id: Some("sess-1".into()),
-            images: vec![ImageRef { url: "https://img.png".into(), mime_type: Some("image/png".into()) }],
+            images: vec![ImageRef { url: "https://img.png".into(), path: None, mime_type: Some("image/png".into()) }],
             config: Some(serde_json::json!({"temperature": 0.7})),
         };
         assert_eq!(input.content, "Hello");
@@ -105,7 +106,7 @@ mod tests {
 
     #[test]
     fn image_ref_optional_mime_type() {
-        let img = ImageRef { url: "https://example.com/photo.jpg".into(), mime_type: None };
+        let img = ImageRef { url: "https://example.com/photo.jpg".into(), path: None, mime_type: None };
         assert!(img.mime_type.is_none());
     }
 
@@ -138,9 +139,9 @@ mod tests {
             content: "Look at these".into(),
             session_id: Some("sess-multi".into()),
             images: vec![
-                ImageRef { url: "https://img1.png".into(), mime_type: Some("image/png".into()) },
-                ImageRef { url: "https://img2.jpg".into(), mime_type: Some("image/jpeg".into()) },
-                ImageRef { url: "data:image/gif;base64,abc".into(), mime_type: None },
+                ImageRef { url: "https://img1.png".into(), path: None, mime_type: Some("image/png".into()) },
+                ImageRef { url: "https://img2.jpg".into(), path: None, mime_type: Some("image/jpeg".into()) },
+                ImageRef { url: "data:image/gif;base64,abc".into(), path: None, mime_type: None },
             ],
             config: None,
         };
@@ -170,6 +171,7 @@ mod tests {
     fn image_ref_clone() {
         let img = ImageRef {
             url: "https://example.com/photo.jpg".into(),
+            path: Some("/tmp/photo.jpg".into()),
             mime_type: Some("image/jpeg".into()),
         };
         let cloned = img.clone();
@@ -181,6 +183,7 @@ mod tests {
     fn image_ref_debug() {
         let img = ImageRef {
             url: "https://example.com/img.png".into(),
+            path: None,
             mime_type: Some("image/png".into()),
         };
         let debug = format!("{:?}", img);

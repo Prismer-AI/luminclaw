@@ -1,8 +1,8 @@
 {
-  "startTime": "2026-03-13T17:36:58.714Z",
-  "endTime": "2026-03-13T17:41:11.862Z",
-  "totalDurationMs": 253148,
-  "model": "us-kimi-k2.5",
+  "startTime": "2026-03-23T20:18:42.913Z",
+  "endTime": "2026-03-23T20:19:02.958Z",
+  "totalDurationMs": 20045,
+  "model": "openai/gpt-oss-120b",
   "factCount": 12,
   "cycleCount": 4,
   "cycles": [
@@ -36,9 +36,9 @@
           "bestScore": 1
         }
       ],
-      "compactionSummaryLength": 386,
-      "memoryFlushLength": 252,
-      "durationMs": 37144
+      "compactionSummaryLength": 440,
+      "memoryFlushLength": 260,
+      "durationMs": 4105
     },
     {
       "cycle": 2,
@@ -55,7 +55,7 @@
         "F05",
         "F06"
       ],
-      "memoryRecallRate": 0.5,
+      "memoryRecallRate": 1,
       "memoryDetails": [
         {
           "factId": "F01",
@@ -74,23 +74,23 @@
         },
         {
           "factId": "F04",
-          "found": false,
-          "bestScore": 0
+          "found": true,
+          "bestScore": 0.75
         },
         {
           "factId": "F05",
-          "found": false,
-          "bestScore": 0
+          "found": true,
+          "bestScore": 0.75
         },
         {
           "factId": "F06",
-          "found": false,
-          "bestScore": 0
+          "found": true,
+          "bestScore": 1
         }
       ],
-      "compactionSummaryLength": 358,
-      "memoryFlushLength": 252,
-      "durationMs": 36110
+      "compactionSummaryLength": 682,
+      "memoryFlushLength": 528,
+      "durationMs": 2655
     },
     {
       "cycle": 3,
@@ -110,7 +110,7 @@
         "F08",
         "F09"
       ],
-      "memoryRecallRate": 0.6666666666666666,
+      "memoryRecallRate": 1,
       "memoryDetails": [
         {
           "factId": "F01",
@@ -129,18 +129,18 @@
         },
         {
           "factId": "F04",
-          "found": false,
-          "bestScore": 0
+          "found": true,
+          "bestScore": 0.75
         },
         {
           "factId": "F05",
-          "found": false,
-          "bestScore": 0
+          "found": true,
+          "bestScore": 0.75
         },
         {
           "factId": "F06",
-          "found": false,
-          "bestScore": 0
+          "found": true,
+          "bestScore": 1
         },
         {
           "factId": "F07",
@@ -158,9 +158,9 @@
           "bestScore": 1
         }
       ],
-      "compactionSummaryLength": 950,
-      "memoryFlushLength": 603,
-      "durationMs": 42260
+      "compactionSummaryLength": 609,
+      "memoryFlushLength": 907,
+      "durationMs": 3080
     },
     {
       "cycle": 4,
@@ -183,7 +183,7 @@
         "F11",
         "F12"
       ],
-      "memoryRecallRate": 0.5833333333333334,
+      "memoryRecallRate": 1,
       "memoryDetails": [
         {
           "factId": "F01",
@@ -202,18 +202,18 @@
         },
         {
           "factId": "F04",
-          "found": false,
-          "bestScore": 0
+          "found": true,
+          "bestScore": 0.75
         },
         {
           "factId": "F05",
-          "found": false,
-          "bestScore": 0
+          "found": true,
+          "bestScore": 0.75
         },
         {
           "factId": "F06",
-          "found": false,
-          "bestScore": 0
+          "found": true,
+          "bestScore": 1
         },
         {
           "factId": "F07",
@@ -233,22 +233,22 @@
         {
           "factId": "F10",
           "found": true,
-          "bestScore": 0.25
+          "bestScore": 1
         },
         {
           "factId": "F11",
-          "found": false,
-          "bestScore": 0
+          "found": true,
+          "bestScore": 1
         },
         {
           "factId": "F12",
-          "found": false,
-          "bestScore": 0
+          "found": true,
+          "bestScore": 0.5
         }
       ],
-      "compactionSummaryLength": 574,
-      "memoryFlushLength": 603,
-      "durationMs": 42998
+      "compactionSummaryLength": 571,
+      "memoryFlushLength": 1216,
+      "durationMs": 2998
     }
   ],
   "finalLLMRecall": {
@@ -256,71 +256,71 @@
       {
         "factId": "F01",
         "recalled": true,
-        "responseSnippet": "Based on our previous session memory from **2026-03-13 at 01:37**, the exact calibration coefficient for your spectrometer is:\n\n**0.03847**"
+        "responseSnippet": "The calibration coefficient for the spectrometer is **0.03847**."
       },
       {
         "factId": "F02",
         "recalled": true,
-        "responseSnippet": "Based on the memory from our previous sessions, the project supervisor is **Professor Yolanda Marchetti** from the **University of Bologna**."
+        "responseSnippet": "The supervising professor is **Yolanda Marchetti** from the **University of Bologna**."
       },
       {
         "factId": "F03",
         "recalled": true,
-        "responseSnippet": "Based on the memory from our previous session (timestamp 01:37), the file path to your primary dataset is:\n\n**`/data/experiments/2026-crystallography/run-47b.parquet`**"
+        "responseSnippet": "The primary dataset is located at:\n\n```\n/data/experiments/2026-crystallography/run-47b.parquet\n```"
       },
       {
         "factId": "F04",
         "recalled": false,
-        "responseSnippet": ""
+        "responseSnippet": "We decided to use the **Fourier‑Bessel decomposition** method for signal analysis (replacing the wavelet transform)."
       },
       {
         "factId": "F05",
-        "recalled": false,
-        "responseSnippet": ""
+        "recalled": true,
+        "responseSnippet": "- **Training batch size:** 2048 samples  \n- **Learning rate:** 3.7 × 10⁻⁵ (i.e., 0.000037)"
       },
       {
         "factId": "F06",
-        "recalled": false,
-        "responseSnippet": ""
+        "recalled": true,
+        "responseSnippet": "- **Redis cache timeout:** 7200 seconds  \n- **Connection‑pool workers:** 24 workers"
       },
       {
         "factId": "F07",
         "recalled": true,
-        "responseSnippet": "Based on the recalled memory from our previous session (2026-03-13, 01:38):\n\n**Dr. Takeshi Yamamoto** from **Kyoto University** developed the original chlorophyll extraction protocol (which you subseq"
+        "responseSnippet": "The chlorophyll extraction protocol was developed by **Dr. Takeshi Yamamoto**, who is affiliated with **Kyoto University**."
       },
       {
         "factId": "F08",
         "recalled": true,
-        "responseSnippet": "Based on the memory from our previous session (01:38), you are using **Apache Pulsar** as the message broker, with the namespace **`prismer-bio`**.\n\nAdditional configuration details recalled:\n- **Part"
+        "responseSnippet": "- **Message broker:** Apache Pulsar  \n- **Namespace:** `prismer‑bio`"
       },
       {
         "factId": "F09",
         "recalled": true,
-        "responseSnippet": "Based on the memory from our previous session (timestamp 01:38), the **ICML 2027 submission deadline is January 23rd**.\n\nRelated context from that same discussion: There is an action item to complete "
+        "responseSnippet": "The ICML 2027 submission deadline is **January 23 2027**."
       },
       {
         "factId": "F10",
-        "recalled": false,
-        "responseSnippet": ""
+        "recalled": true,
+        "responseSnippet": "The diffusion coefficient we are using is  \n\n\\[\nD \\;=\\; \\frac{k\\,T}{6\\pi\\,\\eta\\,r}\n\\]\n\nwhere \\(k\\) is Boltzmann’s constant, \\(T\\) the absolute temperature, \\(\\eta\\) the dynamic viscosity, and \\(r\\) th"
       },
       {
         "factId": "F11",
-        "recalled": false,
-        "responseSnippet": "I don't have any record of discussing PyTorch version pinning in the available memory from our previous sessions. The memory I have access to covers:\n\n- Spectrometer calibration and crystallography da"
+        "recalled": true,
+        "responseSnippet": "We pinned **PyTorch 2.4.1** (paired with CUDA Toolkit 12.6). The reason was to **avoid a gradient‑accumulation bug that appears in PyTorch 2.5.0**."
       },
       {
         "factId": "F12",
-        "recalled": false,
-        "responseSnippet": ""
+        "recalled": true,
+        "responseSnippet": "- **GCP project ID:** `prismer-research-42`  \n- **Compute region:** `us-central1-f`"
       }
     ],
-    "recallRate": 0.5
+    "recallRate": 0.9166666666666666
   },
   "memoryRecallCurve": [
     1,
-    0.5,
-    0.6666666666666666,
-    0.5833333333333334
+    1,
+    1,
+    1
   ],
-  "chart": "\nMemory Store Recall by Compaction Cycle\n───────────────────────────────────────────────────────\nCycle 1 │████████████████████  100%  3/3\nCycle 2 │██████████░░░░░░░░░░   50%  3/6\nCycle 3 │█████████████░░░░░░░   67%  6/9\nCycle 4 │████████████░░░░░░░░   58%  7/12\n───────────────────────────────────────────────────────\nFinal LLM Recall (with memory context):  50%\n"
+  "chart": "\nMemory Store Recall by Compaction Cycle\n───────────────────────────────────────────────────────\nCycle 1 │████████████████████  100%  3/3\nCycle 2 │████████████████████  100%  6/6\nCycle 3 │████████████████████  100%  9/9\nCycle 4 │████████████████████  100%  12/12\n───────────────────────────────────────────────────────\nFinal LLM Recall (with memory context):  92%\n"
 }

@@ -26,7 +26,7 @@ pub mod task;
 pub mod world_model;
 
 // Re-exports
-pub use config::{LuminConfig, ApprovalConfig, SessionConfig, ServerConfig, EventBusConfig, MemoryConfig};
+pub use config::{LuminConfig, ApprovalConfig, SessionConfig, ServerConfig, EventBusConfig, MemoryConfig, LogConfig, ModulesConfig, PrismerConfig};
 pub use provider::{Provider, OpenAIProvider, FallbackProvider, ChatRequest, ChatResponse, ToolCall, ContentBlock, ImageUrlBlock, MessageContent};
 pub use tools::{Tool, ToolRegistry, ToolContext, ToolEvent, EmitFn};
 pub use session::{Session, SessionStore};

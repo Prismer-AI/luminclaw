@@ -359,6 +359,18 @@ impl PrismerAgent {
         session: &mut Session,
         cancelled: Option<Arc<Mutex<bool>>>,
     ) -> Result<AgentResult, String> {
+        self.process_message_full(input, session, cancelled, None, None).await
+    }
+
+    /// Full process_message with all optional parameters (mirrors TS signature).
+    pub async fn process_message_full(
+        &self,
+        input: &str,
+        session: &mut Session,
+        cancelled: Option<Arc<Mutex<bool>>>,
+        memory_context: Option<&str>,
+        _images: Option<&[crate::loop_types::ImageRef]>,
+    ) -> Result<AgentResult, String> {
         let mut tools_used: HashSet<String> = HashSet::new();
         let mut all_directives: Vec<Directive> = Vec::new();
         let mut last_text = String::new();
@@ -422,7 +434,7 @@ impl PrismerAgent {
             }
 
             // ── Build messages from session (user input already in session.messages) ──
-            let mut messages = session.build_messages(&self.system_prompt);
+            let mut messages = session.build_messages_with_memory(&self.system_prompt, memory_context);
 
             let total_chars: usize = messages.iter()
                 .map(|m| m.content.as_ref().map_or(0, |c| c.char_len()))

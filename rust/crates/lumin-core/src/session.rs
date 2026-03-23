@@ -2,13 +2,22 @@
 
 use crate::provider::Message;
 use dashmap::DashMap;
+use serde::{Serialize, Deserialize};
 use std::sync::Arc;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Directive {
+    pub r#type: String,
+    pub payload: serde_json::Value,
+    pub timestamp: String,
+}
 
 #[derive(Debug, Clone)]
 pub struct Session {
     pub id: String,
     pub parent_id: Option<String>,
     pub messages: Vec<Message>,
+    pub pending_directives: Vec<Directive>,
     pub compaction_summary: Option<String>,
     pub last_activity: u64,
 }
@@ -19,6 +28,7 @@ impl Session {
             id: id.to_string(),
             parent_id: None,
             messages: Vec::new(),
+            pending_directives: Vec::new(),
             compaction_summary: None,
             last_activity: now_ms(),
         }
@@ -29,13 +39,32 @@ impl Session {
         self.last_activity = now_ms();
     }
 
+    /// Track a directive emitted during this session.
+    pub fn add_pending_directive(&mut self, directive: Directive) {
+        self.pending_directives.push(directive);
+    }
+
+    /// Drain all pending directives (returns and clears).
+    pub fn drain_directives(&mut self) -> Vec<Directive> {
+        std::mem::take(&mut self.pending_directives)
+    }
+
     /// Build the full message list for an LLM call.
     /// User input should already be in `self.messages` (added by agent before calling this).
     pub fn build_messages(&self, system_prompt: &str) -> Vec<Message> {
+        self.build_messages_with_memory(system_prompt, None)
+    }
+
+    /// Build messages with optional memory context appended to system prompt.
+    pub fn build_messages_with_memory(&self, system_prompt: &str, memory_context: Option<&str>) -> Vec<Message> {
         let mut msgs = Vec::new();
 
-        // System prompt
-        msgs.push(Message::system(system_prompt));
+        // System prompt (with memory context if present)
+        let mut system = system_prompt.to_string();
+        if let Some(mem) = memory_context {
+            system.push_str(&format!("\n\n## Relevant Memory\n{mem}"));
+        }
+        msgs.push(Message::system(&system));
 
         // Compaction summary (if any)
         if let Some(summary) = &self.compaction_summary {

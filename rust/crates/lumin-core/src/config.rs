@@ -24,6 +24,12 @@ pub struct LuminConfig {
     pub event_bus: EventBusConfig,
     #[serde(default)]
     pub memory: MemoryConfig,
+    #[serde(default)]
+    pub log: LogConfig,
+    #[serde(default)]
+    pub modules: ModulesConfig,
+    #[serde(default)]
+    pub prismer: PrismerConfig,
 }
 
 /// Approval gate for sensitive tools — mirrors TS `approval` config.
@@ -73,6 +79,53 @@ pub struct MemoryConfig {
     pub backend: String,
     #[serde(default = "default_recent_context_max_chars")]
     pub recent_context_max_chars: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogConfig {
+    #[serde(default = "default_log_level")]
+    pub level: String,
+    #[serde(default)]
+    pub debug: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModulesConfig {
+    #[serde(default)]
+    pub enabled: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrismerConfig {
+    #[serde(default)]
+    pub api_base_url: String,
+    #[serde(default)]
+    pub agent_id: String,
+    #[serde(default)]
+    pub workspace_id: String,
+    #[serde(default)]
+    pub im_base_url: String,
+    #[serde(default)]
+    pub im_conversation_id: String,
+    #[serde(default)]
+    pub im_token: String,
+}
+
+fn default_log_level() -> String { "info".into() }
+
+impl Default for LogConfig {
+    fn default() -> Self { Self { level: default_log_level(), debug: false } }
+}
+impl Default for ModulesConfig {
+    fn default() -> Self { Self { enabled: vec![] } }
+}
+impl Default for PrismerConfig {
+    fn default() -> Self {
+        Self {
+            api_base_url: String::new(), agent_id: String::new(), workspace_id: String::new(),
+            im_base_url: String::new(), im_conversation_id: String::new(), im_token: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -265,6 +318,9 @@ impl Default for LuminConfig {
             server: ServerConfig::default(),
             event_bus: EventBusConfig::default(),
             memory: MemoryConfig::default(),
+            log: LogConfig::default(),
+            modules: ModulesConfig::default(),
+            prismer: PrismerConfig::default(),
         }
     }
 }
