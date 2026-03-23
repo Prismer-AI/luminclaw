@@ -57,6 +57,8 @@ export interface AgentLoopCallOpts {
    * If omitted, a private bus is created and discarded after the call.
    */
   bus?: EventBus;
+  /** AbortSignal for cancelling an in-flight agent run. */
+  signal?: AbortSignal;
 }
 
 // ── Interface ─────────────────────────────────────────────

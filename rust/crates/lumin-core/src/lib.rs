@@ -27,7 +27,7 @@ pub mod world_model;
 
 // Re-exports
 pub use config::LuminConfig;
-pub use provider::{Provider, OpenAIProvider, ChatRequest, ChatResponse, ToolCall};
+pub use provider::{Provider, OpenAIProvider, FallbackProvider, ChatRequest, ChatResponse, ToolCall};
 pub use tools::{Tool, ToolRegistry, ToolContext};
 pub use session::{Session, SessionStore};
 pub use agent::{PrismerAgent, AgentResult, AgentOptions};

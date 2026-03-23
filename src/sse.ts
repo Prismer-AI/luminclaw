@@ -90,6 +90,14 @@ export const AgentEventSchema = z.discriminatedUnion('type', [
       sessionId: z.string(),
     }),
   }),
+  z.object({
+    type: z.literal('chat.final'),
+    data: z.record(z.unknown()),
+  }),
+  z.object({
+    type: z.literal('task.completed'),
+    data: z.record(z.unknown()),
+  }),
 ]);
 
 /** A single agent event (inferred from {@link AgentEventSchema}). */

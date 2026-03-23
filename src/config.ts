@@ -180,7 +180,7 @@ function fromEnv(): Record<string, unknown> {
   if (env.OPENAI_API_KEY) llm.apiKey = env.OPENAI_API_KEY;
   if (env.AGENT_DEFAULT_MODEL) {
     const m = env.AGENT_DEFAULT_MODEL;
-    llm.model = m.includes('/') ? m.split('/').pop()! : m;
+    llm.model = m.startsWith('prismer-gateway/') ? m.slice('prismer-gateway/'.length) : m;
   }
   if (env.MODEL_FALLBACK_CHAIN) llm.fallbackModels = env.MODEL_FALLBACK_CHAIN.split(',').filter(Boolean);
   if (Object.keys(llm).length) raw.llm = llm;

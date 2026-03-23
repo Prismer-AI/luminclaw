@@ -260,6 +260,8 @@ export class OpenAICompatibleProvider implements Provider {
           // Reasoning content (thinking models like kimi-k2.5)
           if (delta.reasoning_content) {
             reasoningText += delta.reasoning_content;
+          } else if (delta.reasoning) {
+            reasoningText += delta.reasoning;
           }
 
           // Text content
@@ -344,7 +346,8 @@ export class OpenAICompatibleProvider implements Provider {
     };
     if (msg.name) formatted.name = msg.name;
     if (msg.toolCallId) formatted.tool_call_id = msg.toolCallId;
-    if (msg.reasoningContent) formatted.reasoning_content = msg.reasoningContent;
+    // NOTE: reasoning_content is stored internally but NOT sent back to the API
+    // — many providers reject unknown properties on assistant messages.
     if (msg.toolCalls) formatted.tool_calls = msg.toolCalls;
     return formatted;
   }
@@ -376,7 +379,7 @@ export class OpenAICompatibleProvider implements Provider {
     return {
       text: message.content ?? '',
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-      thinking: message.reasoning_content ?? message.thinking ?? undefined,
+      thinking: message.reasoning_content ?? message.reasoning ?? message.thinking ?? undefined,
       usage: usage ? {
         promptTokens: usage.prompt_tokens ?? 0,
         completionTokens: usage.completion_tokens ?? 0,

@@ -108,7 +108,7 @@ export class DualLoopAgent implements IAgentLoop {
     const baseUrl = (inputCfg.baseUrl as string) || cfg.llm.baseUrl;
     const apiKey = (inputCfg.apiKey as string) || cfg.llm.apiKey;
     const rawModel = (inputCfg.model as string) || cfg.llm.model;
-    const model = rawModel.includes('/') ? rawModel.split('/').pop()! : rawModel;
+    const model = rawModel.startsWith('prismer-gateway/') ? rawModel.slice('prismer-gateway/'.length) : rawModel;
 
     const baseProvider = new OpenAICompatibleProvider({ baseUrl, apiKey, defaultModel: model });
     const fallbacks = cfg.llm.fallbackModels;
@@ -213,6 +213,15 @@ export class DualLoopAgent implements IAgentLoop {
       });
 
       bus.publish({ type: 'agent.end' as const, data: { sessionId: session.id, toolsUsed: result.toolsUsed } });
+
+      // Emit chat.final so WebSocket/SSE clients receive the completed result
+      bus.publish({ type: 'chat.final' as const, data: {
+        content: result.text,
+        thinking: result.thinking,
+        toolsUsed: result.toolsUsed,
+        sessionId: session.id,
+        taskId: task.id,
+      }});
     } catch (err) {
       this.stateMachine.fail(task, err instanceof Error ? err.message : String(err));
       bus.publish({ type: 'error' as const, data: { message: err instanceof Error ? err.message : String(err) } });

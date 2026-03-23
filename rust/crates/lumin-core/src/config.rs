@@ -53,8 +53,8 @@ pub struct WorkspaceConfig {
 // Defaults
 fn default_port() -> u16 { 3001 }
 fn default_host() -> String { "0.0.0.0".into() }
-fn default_base_url() -> String { "http://localhost:3000/v1".into() }
-fn default_model() -> String { "us-kimi-k2.5".into() }
+fn default_base_url() -> String { "https://api.openai.com/v1".into() }
+fn default_model() -> String { "gpt-4o".into() }
 fn default_max_tokens() -> u32 { 8192 }
 fn default_request_timeout() -> u64 { 300_000 }
 fn default_max_iterations() -> u32 { 40 }
@@ -104,7 +104,12 @@ impl LuminConfig {
         if let Ok(v) = std::env::var("OPENAI_API_BASE_URL") { cfg.llm.base_url = v; }
         if let Ok(v) = std::env::var("OPENAI_API_KEY") { cfg.llm.api_key = v; }
         if let Ok(v) = std::env::var("AGENT_DEFAULT_MODEL") {
-            cfg.llm.model = if v.contains('/') { v.split('/').last().unwrap_or(&v).to_string() } else { v };
+            // Only strip the prismer-gateway/ prefix; keep other prefixes (e.g. openai/) intact
+            cfg.llm.model = if v.starts_with("prismer-gateway/") {
+                v.strip_prefix("prismer-gateway/").unwrap().to_string()
+            } else {
+                v
+            };
         }
         if let Ok(v) = std::env::var("LUMIN_LOOP_MODE") { cfg.agent.loop_mode = v; }
         if let Ok(v) = std::env::var("WORKSPACE_DIR") { cfg.workspace.dir = v; }
@@ -129,13 +134,260 @@ impl Default for LuminConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Mutex to serialize tests that mutate environment variables.
+    // Required because env vars are process-global state.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Helper: set env vars, run a closure, then restore originals.
+    fn with_env_vars<F: FnOnce()>(vars: &[(&str, &str)], f: F) {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let saved: Vec<(&str, Option<String>)> = vars
+            .iter()
+            .map(|(k, _)| (*k, std::env::var(k).ok()))
+            .collect();
+        for (k, v) in vars {
+            // SAFETY: test-only; serialized by ENV_LOCK so no concurrent access.
+            unsafe { std::env::set_var(k, v); }
+        }
+        f();
+        for (k, original) in &saved {
+            match original {
+                // SAFETY: test-only; serialized by ENV_LOCK.
+                Some(v) => unsafe { std::env::set_var(k, v); },
+                None => unsafe { std::env::remove_var(k); },
+            }
+        }
+    }
+
+    /// Helper: remove env vars, run closure, restore originals.
+    fn without_env_vars<F: FnOnce()>(keys: &[&str], f: F) {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let saved: Vec<(&str, Option<String>)> = keys
+            .iter()
+            .map(|k| (*k, std::env::var(k).ok()))
+            .collect();
+        for k in keys {
+            // SAFETY: test-only; serialized by ENV_LOCK.
+            unsafe { std::env::remove_var(k); }
+        }
+        f();
+        for (k, original) in &saved {
+            if let Some(v) = original {
+                // SAFETY: test-only; serialized by ENV_LOCK.
+                unsafe { std::env::set_var(k, v); }
+            }
+        }
+    }
+
+    // ── Default values ──
 
     #[test]
     fn default_config() {
         let cfg = LuminConfig::default();
         assert_eq!(cfg.port, 3001);
-        assert_eq!(cfg.llm.model, "us-kimi-k2.5");
+        assert_eq!(cfg.llm.model, "gpt-4o");
         assert_eq!(cfg.agent.max_iterations, 40);
         assert_eq!(cfg.agent.loop_mode, "single");
+    }
+
+    #[test]
+    fn default_values_for_all_fields() {
+        let cfg = LuminConfig::default();
+        assert_eq!(cfg.port, 3001);
+        assert_eq!(cfg.host, "0.0.0.0");
+        assert_eq!(cfg.llm.base_url, "https://api.openai.com/v1");
+        assert_eq!(cfg.llm.api_key, "");
+        assert_eq!(cfg.llm.model, "gpt-4o");
+        assert!(cfg.llm.fallback_models.is_empty());
+        assert_eq!(cfg.llm.max_tokens, 8192);
+        assert_eq!(cfg.llm.request_timeout_ms, 300_000);
+        assert_eq!(cfg.agent.max_iterations, 40);
+        assert_eq!(cfg.agent.max_context_chars, 600_000);
+        assert_eq!(cfg.agent.loop_mode, "single");
+        assert_eq!(cfg.workspace.dir, "/workspace");
+        assert_eq!(cfg.workspace.plugin_path, "/opt/prismer/plugins/prismer-workspace/dist/src/tools.js");
+    }
+
+    #[test]
+    fn default_workspace_dir_is_workspace() {
+        let cfg = LuminConfig::default();
+        assert_eq!(cfg.workspace.dir, "/workspace");
+    }
+
+    #[test]
+    fn default_base_url_is_openai() {
+        let cfg = LuminConfig::default();
+        assert_eq!(cfg.llm.base_url, "https://api.openai.com/v1");
+    }
+
+    // ── LlmConfig default ──
+
+    #[test]
+    fn llm_config_default() {
+        let llm = LlmConfig::default();
+        assert_eq!(llm.base_url, "https://api.openai.com/v1");
+        assert_eq!(llm.api_key, "");
+        assert_eq!(llm.model, "gpt-4o");
+        assert!(llm.fallback_models.is_empty());
+        assert_eq!(llm.max_tokens, 8192);
+        assert_eq!(llm.request_timeout_ms, 300_000);
+    }
+
+    // ── AgentConfig default ──
+
+    #[test]
+    fn agent_config_default() {
+        let agent = AgentConfig::default();
+        assert_eq!(agent.max_iterations, 40);
+        assert_eq!(agent.max_context_chars, 600_000);
+        assert_eq!(agent.loop_mode, "single");
+    }
+
+    // ── WorkspaceConfig default ──
+
+    #[test]
+    fn workspace_config_default() {
+        let ws = WorkspaceConfig::default();
+        assert_eq!(ws.dir, "/workspace");
+    }
+
+    // ── from_env ──
+
+    #[test]
+    fn from_env_reads_openai_api_base_url() {
+        with_env_vars(&[("OPENAI_API_BASE_URL", "http://myserver:5000/v1")], || {
+            let cfg = LuminConfig::from_env();
+            assert_eq!(cfg.llm.base_url, "http://myserver:5000/v1");
+        });
+    }
+
+    #[test]
+    fn from_env_reads_openai_api_key() {
+        with_env_vars(&[("OPENAI_API_KEY", "sk-test-key-123")], || {
+            let cfg = LuminConfig::from_env();
+            assert_eq!(cfg.llm.api_key, "sk-test-key-123");
+        });
+    }
+
+    #[test]
+    fn from_env_reads_agent_default_model_with_prefix_stripping() {
+        with_env_vars(&[("AGENT_DEFAULT_MODEL", "prismer-gateway/us-kimi-k2.5")], || {
+            let cfg = LuminConfig::from_env();
+            assert_eq!(cfg.llm.model, "us-kimi-k2.5");
+        });
+    }
+
+    #[test]
+    fn from_env_reads_agent_default_model_without_prefix_kept_as_is() {
+        with_env_vars(&[("AGENT_DEFAULT_MODEL", "openai/gpt-4o")], || {
+            let cfg = LuminConfig::from_env();
+            assert_eq!(cfg.llm.model, "openai/gpt-4o");
+        });
+    }
+
+    #[test]
+    fn from_env_reads_agent_default_model_plain() {
+        with_env_vars(&[("AGENT_DEFAULT_MODEL", "claude-sonnet-4")], || {
+            let cfg = LuminConfig::from_env();
+            assert_eq!(cfg.llm.model, "claude-sonnet-4");
+        });
+    }
+
+    #[test]
+    fn from_env_reads_lumin_loop_mode() {
+        with_env_vars(&[("LUMIN_LOOP_MODE", "continuous")], || {
+            let cfg = LuminConfig::from_env();
+            assert_eq!(cfg.agent.loop_mode, "continuous");
+        });
+    }
+
+    #[test]
+    fn from_env_reads_workspace_dir() {
+        with_env_vars(&[("WORKSPACE_DIR", "/home/user/workspace")], || {
+            let cfg = LuminConfig::from_env();
+            assert_eq!(cfg.workspace.dir, "/home/user/workspace");
+        });
+    }
+
+    #[test]
+    fn from_env_reads_max_context_chars() {
+        with_env_vars(&[("MAX_CONTEXT_CHARS", "400000")], || {
+            let cfg = LuminConfig::from_env();
+            assert_eq!(cfg.agent.max_context_chars, 400_000);
+        });
+    }
+
+    #[test]
+    fn from_env_reads_lumin_port() {
+        with_env_vars(&[("LUMIN_PORT", "8080")], || {
+            let cfg = LuminConfig::from_env();
+            assert_eq!(cfg.port, 8080);
+        });
+    }
+
+    #[test]
+    fn from_env_invalid_port_falls_back_to_default() {
+        with_env_vars(&[("LUMIN_PORT", "not-a-number")], || {
+            let cfg = LuminConfig::from_env();
+            assert_eq!(cfg.port, 3001);
+        });
+    }
+
+    #[test]
+    fn from_env_invalid_max_context_chars_falls_back_to_default() {
+        with_env_vars(&[("MAX_CONTEXT_CHARS", "abc")], || {
+            let cfg = LuminConfig::from_env();
+            assert_eq!(cfg.agent.max_context_chars, 600_000);
+        });
+    }
+
+    #[test]
+    fn from_env_defaults_when_no_env_vars() {
+        without_env_vars(
+            &[
+                "LUMIN_PORT", "OPENAI_API_BASE_URL", "OPENAI_API_KEY",
+                "AGENT_DEFAULT_MODEL", "LUMIN_LOOP_MODE", "WORKSPACE_DIR",
+                "MAX_CONTEXT_CHARS",
+            ],
+            || {
+                let cfg = LuminConfig::from_env();
+                assert_eq!(cfg.port, 3001);
+                assert_eq!(cfg.llm.base_url, "https://api.openai.com/v1");
+                assert_eq!(cfg.llm.model, "gpt-4o");
+                assert_eq!(cfg.agent.loop_mode, "single");
+                assert_eq!(cfg.workspace.dir, "/workspace");
+                assert_eq!(cfg.agent.max_context_chars, 600_000);
+            },
+        );
+    }
+
+    // ── Serde deserialization ──
+
+    #[test]
+    fn deserialize_empty_json_uses_defaults() {
+        let cfg: LuminConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.port, 3001);
+        assert_eq!(cfg.host, "0.0.0.0");
+        assert_eq!(cfg.llm.base_url, "https://api.openai.com/v1");
+        assert_eq!(cfg.llm.model, "gpt-4o");
+    }
+
+    #[test]
+    fn deserialize_nested_overrides() {
+        let json = r#"{
+            "port": 8080,
+            "llm": { "model": "gpt-4o", "max_tokens": 4096 },
+            "agent": { "max_iterations": 20 }
+        }"#;
+        let cfg: LuminConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.port, 8080);
+        assert_eq!(cfg.llm.model, "gpt-4o");
+        assert_eq!(cfg.llm.max_tokens, 4096);
+        // Defaults preserved for unspecified fields
+        assert_eq!(cfg.llm.base_url, "https://api.openai.com/v1");
+        assert_eq!(cfg.agent.max_iterations, 20);
+        assert_eq!(cfg.agent.max_context_chars, 600_000);
     }
 }

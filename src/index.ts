@@ -297,8 +297,9 @@ export async function runAgent(input: InputMessage, opts: RunAgentOptions = {}):
   const baseUrl = inputCfg.baseUrl || cfg.llm.baseUrl;
   const apiKey = inputCfg.apiKey || cfg.llm.apiKey;
   const rawModel = inputCfg.model || cfg.llm.model;
-  // Strip provider prefix (e.g. "prismer-gateway/us-kimi-k2.5" → "us-kimi-k2.5")
-  const model = rawModel.includes('/') ? rawModel.split('/').pop()! : rawModel;
+  // Strip only the Prismer gateway prefix (e.g. "prismer-gateway/us-kimi-k2.5" → "us-kimi-k2.5")
+  // Keep other prefixes intact (e.g. "openai/gpt-oss-120b" stays as-is for external gateways)
+  const model = rawModel.startsWith('prismer-gateway/') ? rawModel.slice('prismer-gateway/'.length) : rawModel;
   const workspaceDir = cfg.workspace.dir;
 
   const baseProvider = new OpenAICompatibleProvider({ baseUrl, apiKey, defaultModel: model });

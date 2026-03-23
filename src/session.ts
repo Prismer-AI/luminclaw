@@ -34,7 +34,8 @@ export interface Directive {
  * @example
  * ```typescript
  * const session = new Session('s1');
- * const messages = session.buildMessages('hello', systemPrompt);
+ * session.addMessage({ role: 'user', content: 'hello' });
+ * const messages = session.buildMessages(systemPrompt);
  * ```
  */
 export class Session {
@@ -50,12 +51,12 @@ export class Session {
     this.parentId = parentId;
   }
 
-  /** Build the message array for LLM call */
+  /** Build the message array for LLM call.
+   *  User input should already be in `this.messages` (added by agent before calling this).
+   */
   buildMessages(
-    userInput: string,
     systemPrompt: string,
     memoryContext?: string,
-    images?: ImageRef[],
   ): Message[] {
     const msgs: Message[] = [];
 
@@ -72,27 +73,8 @@ export class Session {
       msgs.push({ role: 'assistant', content: 'Understood, I have the context from our earlier conversation.' });
     }
 
-    // Previous conversation history — with orphaned tool_call repair
+    // Conversation history (includes user messages) — with orphaned tool_call repair
     msgs.push(...repairOrphanedToolCalls(this.messages));
-
-    // Current user input — multimodal when images are present
-    if (images && images.length > 0) {
-      const contentBlocks: ContentBlock[] = [];
-      // Text first
-      if (userInput) {
-        contentBlocks.push({ type: 'text', text: userInput });
-      }
-      // Then images (OpenAI-compatible image_url format)
-      for (const img of images) {
-        contentBlocks.push({
-          type: 'image_url',
-          image_url: { url: img.url, detail: 'auto' },
-        });
-      }
-      msgs.push({ role: 'user', content: contentBlocks });
-    } else {
-      msgs.push({ role: 'user', content: userInput });
-    }
 
     return msgs;
   }

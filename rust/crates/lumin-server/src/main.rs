@@ -46,6 +46,7 @@ pub(crate) struct AppState {
     pub config: LuminConfig,
     pub loop_mode: LoopMode,
     pub start_time: std::time::Instant,
+    pub sessions: lumin_core::SessionStore,
 }
 
 #[tokio::main]
@@ -111,7 +112,11 @@ async fn main() {
 
             info!(mode = %loop_mode, port, "starting lumin gateway (rust)");
 
-            let state = Arc::new(AppState { config: config.clone(), loop_mode, start_time: std::time::Instant::now() });
+            let state = Arc::new(AppState {
+                config: config.clone(), loop_mode,
+                start_time: std::time::Instant::now(),
+                sessions: lumin_core::SessionStore::new(),
+            });
 
             let app = Router::new()
                 .route("/health", get(http::health))

@@ -1,11 +1,14 @@
 //! HTTP handlers — /health, /v1/chat, /v1/artifacts
-//! Now wired to real LLM via OpenAIProvider.
+//! Now wired through PrismerAgent for full agent loop.
 
 use axum::{
     extract::State,
     response::Json,
 };
-use lumin_core::provider::{OpenAIProvider, Provider, ChatRequest as LlmRequest, Message};
+use lumin_core::provider::{OpenAIProvider, FallbackProvider, Provider};
+use lumin_core::{PrismerAgent, AgentOptions, ToolRegistry, PromptBuilder, MemoryStore, Tool};
+use lumin_core::tools::create_bash_tool;
+use lumin_core::sse::EventBus;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Instant;
@@ -16,6 +19,7 @@ use super::AppState;
 // ── Health ────────────────────────────────────────────────
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HealthResponse {
     pub status: String,
     pub version: String,
@@ -28,30 +32,37 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
     Json(HealthResponse {
         status: if state.config.llm.api_key.is_empty() { "degraded" } else { "ok" }.into(),
         version: "0.1.0-rust".into(),
-        runtime: "lumin-rust".into(),
+        runtime: "lumin".into(),
         loop_mode: state.loop_mode.to_string(),
         uptime: state.start_time.elapsed().as_secs_f64(),
     })
 }
 
-// ── Chat (real LLM) ──────────────────────────────────────
+// ── Chat (via PrismerAgent) ──────────────────────────────
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ChatRequest {
     pub content: String,
+    #[serde(alias = "session_id")]
     pub session_id: Option<String>,
     pub config: Option<ChatConfig>,
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ChatConfig {
     pub model: Option<String>,
+    #[serde(alias = "base_url")]
     pub base_url: Option<String>,
+    #[serde(alias = "api_key")]
     pub api_key: Option<String>,
+    #[serde(alias = "max_iterations")]
     pub max_iterations: Option<u32>,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ChatResponse {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -73,6 +84,7 @@ pub struct ChatResponse {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UsageResponse {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
@@ -99,7 +111,7 @@ pub async fn chat(
             thinking: None,
             error: Some("No API key configured".into()),
             session_id,
-            runtime: "lumin-rust".into(),
+            runtime: "lumin".into(),
             iterations: None,
             tools_used: None,
             duration_ms: Some(start.elapsed().as_millis() as u64),
@@ -107,167 +119,196 @@ pub async fn chat(
         });
     }
 
-    let provider = OpenAIProvider::new(base_url, api_key, model);
+    // Dual-loop mode: create task and return immediately
+    if state.loop_mode == lumin_core::LoopMode::Dual {
+        let task_id = uuid::Uuid::new_v4().to_string();
+        info!(task_id = %task_id, "dual-loop task created");
 
-    // Simple agent loop: LLM call → check for tool calls → repeat
-    let system_prompt = "You are a research assistant. Be concise and precise.";
-    let mut messages = vec![
-        Message::system(system_prompt),
-        Message::user(&payload.content),
-    ];
+        // Spawn background execution
+        let config = state.config.clone();
+        let content = payload.content.clone();
+        let sid = session_id.clone();
+        tokio::spawn(async move {
+            let provider = OpenAIProvider::new(&config.llm.base_url, &config.llm.api_key, &config.llm.model);
+            let mut tools = ToolRegistry::new();
+            tools.register(create_bash_tool(config.workspace.dir.clone()));
+            let bus = Arc::new(EventBus::default());
+            let mut pb = PromptBuilder::new(&config.workspace.dir);
+            pb.load_identity();
+            pb.add_runtime_info(Some("dual-loop"), Some(&config.llm.model), Some(tools.size()));
+            let system_prompt = pb.build();
+            let mut session = lumin_core::Session::new(&sid);
+            let agent = PrismerAgent::new(
+                Arc::new(provider), Arc::new(tools), bus, system_prompt,
+                config.llm.model.clone(), "dual-loop".into(), config.workspace.dir.clone(),
+            );
+            let _ = agent.process_message(&content, &mut session).await;
+        });
 
-    let mut tools_used: Vec<String> = Vec::new();
-    let mut last_text = String::new();
-    let mut last_thinking = None;
-    let mut total_prompt_tokens = 0u32;
-    let mut total_completion_tokens = 0u32;
-    let mut iterations = 0u32;
-
-    // Bash tool spec for LLM
-    let bash_tool = serde_json::json!([{
-        "type": "function",
-        "function": {
-            "name": "bash",
-            "description": "Execute a bash command. Use for file operations, system commands.",
-            "parameters": {
-                "type": "object",
-                "properties": { "command": { "type": "string", "description": "The bash command" } },
-                "required": ["command"]
-            }
-        }
-    }]);
-
-    // Agent loop with tool execution
-    let mut consecutive_errors = 0u32;
-    for iter in 1..=max_iterations {
-        iterations = iter;
-        info!(iteration = iter, model, message_count = messages.len(), "llm_request");
-
-        match provider.chat(LlmRequest {
-            messages: messages.clone(),
-            tools: Some(bash_tool.as_array().unwrap().clone()),
-            model: Some(model.to_string()),
-            max_tokens: Some(state.config.llm.max_tokens),
-            stream: true,
-        }).await {
-            Ok(response) => {
-                if let Some(usage) = &response.usage {
-                    total_prompt_tokens += usage.prompt_tokens;
-                    total_completion_tokens += usage.completion_tokens;
-                }
-                last_text = response.text.clone();
-                last_thinking = response.thinking.clone();
-
-                // No tool calls → add assistant text and break
-                if response.tool_calls.is_empty() {
-                    messages.push(Message::assistant(&response.text));
-                    break;
-                }
-
-                // Has tool calls → add assistant message WITH tool_calls array (OpenAI format)
-                let tc_json: Vec<serde_json::Value> = response.tool_calls.iter().map(|tc| {
-                    serde_json::json!({
-                        "id": tc.id,
-                        "type": "function",
-                        "function": { "name": tc.name, "arguments": serde_json::to_string(&tc.arguments).unwrap_or_default() }
-                    })
-                }).collect();
-                messages.push(Message::assistant_with_tools(tc_json, response.thinking.clone()));
-
-                // Execute tool calls
-                let mut all_errors = true;
-                for tc in &response.tool_calls {
-                    tools_used.push(tc.name.clone());
-                    info!(tool = %tc.name, "tool_start");
-
-                    let result = if tc.name == "bash" {
-                        let cmd = tc.arguments["command"].as_str().unwrap_or("");
-                        match tokio::process::Command::new("/bin/sh")
-                            .arg("-c").arg(cmd)
-                            .current_dir(&state.config.workspace.dir)
-                            .output().await
-                        {
-                            Ok(output) => {
-                                all_errors = false;
-                                let stdout = String::from_utf8_lossy(&output.stdout);
-                                let stderr = String::from_utf8_lossy(&output.stderr);
-                                if output.status.success() {
-                                    stdout[..stdout.len().min(10_000)].to_string()
-                                } else {
-                                    format!("Error: {}", &stderr[..stderr.len().min(5_000)])
-                                }
-                            }
-                            Err(e) => format!("Error: {e}"),
-                        }
-                    } else {
-                        format!("Error: unknown tool '{}'", tc.name)
-                    };
-
-                    info!(tool = %tc.name, result_len = result.len(), "tool_end");
-
-                    // Add tool result with proper tool_call_id (OpenAI format)
-                    messages.push(Message::tool_result(&tc.id, &result));
-                }
-
-                // Doom-loop detection
-                if all_errors {
-                    consecutive_errors += 1;
-                    if consecutive_errors >= 3 {
-                        last_text = "Repeated errors detected. Stopping.".into();
-                        break;
-                    }
-                } else {
-                    consecutive_errors = 0;
-                }
-            }
-            Err(e) => {
-                error!(error = %e, iteration = iter, "llm_error");
-                return Json(ChatResponse {
-                    status: "success".into(),
-                    response: Some(format!("Error: {e}")),
-                    thinking: None,
-                    error: None,
-                    session_id,
-                    runtime: "lumin-rust".into(),
-                    iterations: Some(iterations),
-                    tools_used: None,
-                    duration_ms: Some(start.elapsed().as_millis() as u64),
-                    usage: None,
-                });
-            }
-        }
+        return Json(ChatResponse {
+            status: "success".into(),
+            response: Some(format!("Task {task_id} created and executing.")),
+            thinking: None,
+            error: None,
+            session_id,
+            runtime: "lumin".into(),
+            iterations: Some(0),
+            tools_used: Some(vec![]),
+            duration_ms: Some(start.elapsed().as_millis() as u64),
+            usage: None,
+        });
     }
 
-    let duration_ms = start.elapsed().as_millis() as u64;
-    info!(iterations, duration_ms, tools = ?tools_used, "agent_complete");
+    let base_provider = OpenAIProvider::new(base_url, api_key, model);
+    let fallbacks = state.config.llm.fallback_models.clone();
+    let provider: Arc<dyn Provider> = if fallbacks.is_empty() {
+        Arc::new(base_provider)
+    } else {
+        Arc::new(FallbackProvider::new(base_provider, fallbacks))
+    };
 
-    Json(ChatResponse {
-        status: "success".into(),
-        response: Some(last_text),
-        thinking: last_thinking,
-        error: None,
-        session_id,
-        runtime: "lumin-rust".into(),
-        iterations: Some(iterations),
-        tools_used: Some(tools_used),
-        duration_ms: Some(duration_ms),
-        usage: Some(UsageResponse {
-            prompt_tokens: total_prompt_tokens,
-            completion_tokens: total_completion_tokens,
-        }),
-    })
+    // Set up tools (bash + memory_store + memory_recall — matching TS)
+    let mut tools = ToolRegistry::new();
+    tools.register(create_bash_tool(state.config.workspace.dir.clone()));
+    let workspace_dir = state.config.workspace.dir.clone();
+    {
+        let wd = workspace_dir.clone();
+        tools.register(Tool {
+            name: "memory_store".into(),
+            description: "Store a memory entry for later recall.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "content": { "type": "string", "description": "The memory content to store" },
+                    "tags": { "type": "array", "items": { "type": "string" }, "description": "Optional tags" }
+                },
+                "required": ["content"]
+            }),
+            execute: std::sync::Arc::new(move |args, _ctx| {
+                let wd = wd.clone();
+                Box::pin(async move {
+                    let mem = MemoryStore::new(&wd);
+                    let content = args["content"].as_str().unwrap_or("");
+                    let tags: Vec<&str> = args["tags"].as_array()
+                        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                        .unwrap_or_default();
+                    match mem.store(content, &tags) {
+                        Ok(_) => "Memory stored successfully.".into(),
+                        Err(e) => format!("Error: {e}"),
+                    }
+                })
+            }),
+        });
+    }
+    {
+        let wd = workspace_dir.clone();
+        tools.register(Tool {
+            name: "memory_recall".into(),
+            description: "Search stored memories by keywords.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Keywords to search for" }
+                },
+                "required": ["query"]
+            }),
+            execute: std::sync::Arc::new(move |args, _ctx| {
+                let wd = wd.clone();
+                Box::pin(async move {
+                    let mem = MemoryStore::new(&wd);
+                    let query = args["query"].as_str().unwrap_or("");
+                    match mem.recall(query, 4000) {
+                        Some(result) => result,
+                        None => "No matching memories found.".into(),
+                    }
+                })
+            }),
+        });
+    }
+
+    // Set up EventBus
+    let bus = Arc::new(EventBus::default());
+
+    // Build system prompt
+    let mut pb = PromptBuilder::new(&state.config.workspace.dir);
+    pb.load_identity();
+    pb.load_tools_ref();
+    pb.load_user_profile();
+    pb.add_runtime_info(Some("researcher"), Some(model), Some(tools.size()));
+    let system_prompt = pb.build();
+
+    // Get or create session (persistent across requests)
+    let mut session = state.sessions.get_or_create(&session_id);
+
+    let agent = PrismerAgent::new(
+        provider,
+        Arc::new(tools),
+        bus,
+        system_prompt,
+        model.to_string(),
+        "researcher".into(),
+        state.config.workspace.dir.clone(),
+    ).with_options(AgentOptions {
+        max_iterations,
+        max_context_chars: state.config.agent.max_context_chars,
+        ..AgentOptions::default()
+    });
+
+    match agent.process_message(&payload.content, &mut session).await {
+        Ok(result) => {
+            // Persist session for multi-turn
+            state.sessions.update(session);
+
+            let duration_ms = start.elapsed().as_millis() as u64;
+            info!(iterations = result.iterations, duration_ms, tools = ?result.tools_used, "agent_complete");
+
+            Json(ChatResponse {
+                status: "success".into(),
+                response: Some(result.text),
+                thinking: result.thinking,
+                error: None,
+                session_id,
+                runtime: "lumin".into(),
+                iterations: Some(result.iterations),
+                tools_used: Some(result.tools_used),
+                duration_ms: Some(duration_ms),
+                usage: result.usage.map(|u| UsageResponse {
+                    prompt_tokens: u.prompt_tokens,
+                    completion_tokens: u.completion_tokens,
+                }),
+            })
+        }
+        Err(e) => {
+            error!(error = %e, "agent_error");
+            Json(ChatResponse {
+                status: "error".into(),
+                response: None,
+                thinking: None,
+                error: Some(e),
+                session_id,
+                runtime: "lumin".into(),
+                iterations: None,
+                tools_used: None,
+                duration_ms: Some(start.elapsed().as_millis() as u64),
+                usage: None,
+            })
+        }
+    }
 }
 
 // ── Artifacts ─────────────────────────────────────────────
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ArtifactRequest {
     pub url: String,
+    #[serde(alias = "mime_type")]
     pub mime_type: String,
     pub r#type: Option<String>,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ArtifactResponse {
     pub artifact_id: String,
     pub r#type: String,

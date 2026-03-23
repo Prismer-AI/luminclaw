@@ -34,7 +34,7 @@ impl PromptBuilder {
         } else {
             self.sections.push(PromptSection {
                 id: "identity".into(),
-                content: "## Identity\n\nYou are a research assistant — an AI-powered academic research companion.".into(),
+                content: "## Identity\n\nYou are a Prismer research assistant — an AI-powered academic research companion.\nYou help researchers with paper discovery, reading, data analysis, writing, and peer review.\nYou have access to specialized tools for LaTeX, Jupyter, PDF viewing, notes, and more.\nWhen a task requires a specific tool, use it directly. Be precise and cite sources when available.\nYou maintain conversation context across messages in the same session.".into(),
                 priority: 10.0,
             });
         }
@@ -173,6 +173,230 @@ mod tests {
         let identity_pos = prompt.find("TestBot").unwrap();
         let runtime_pos = prompt.find("lumin-rust").unwrap();
         assert!(identity_pos < runtime_pos);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn default_identity_contains_prismer_assistant() {
+        let dir = "/tmp/lumin-prompt-no-soul";
+        let _ = fs::create_dir_all(dir);
+        // Ensure SOUL.md does NOT exist
+        let _ = fs::remove_file(format!("{dir}/SOUL.md"));
+
+        let mut b = PromptBuilder::new(dir);
+        b.load_identity();
+
+        let prompt = b.build();
+        assert!(
+            prompt.contains("Prismer research assistant"),
+            "Default identity should contain 'Prismer research assistant'"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn priority_ordering_identity_over_agent_config_over_tools_over_runtime() {
+        let dir = "/tmp/lumin-prompt-priority";
+        let _ = fs::create_dir_all(dir);
+        fs::write(format!("{dir}/SOUL.md"), "IDENTITY_MARKER").unwrap();
+        fs::write(format!("{dir}/AGENTS.md"), "AGENT_CONFIG_MARKER").unwrap();
+        fs::write(format!("{dir}/TOOLS.md"), "TOOLS_REF_MARKER").unwrap();
+
+        let mut b = PromptBuilder::new(dir);
+        b.load_identity();        // priority 10
+        b.load_agent_config();    // priority 9
+        b.load_tools_ref();       // priority 8
+        b.add_runtime_info(Some("test"), None, None);  // priority 3
+
+        let prompt = b.build();
+
+        let identity_pos = prompt.find("IDENTITY_MARKER").unwrap();
+        let config_pos = prompt.find("AGENT_CONFIG_MARKER").unwrap();
+        let tools_pos = prompt.find("TOOLS_REF_MARKER").unwrap();
+        let runtime_pos = prompt.find("Runtime Info").unwrap();
+
+        assert!(identity_pos < config_pos, "identity (10) before agent_config (9)");
+        assert!(config_pos < tools_pos, "agent_config (9) before tools (8)");
+        assert!(tools_pos < runtime_pos, "tools (8) before runtime (3)");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn add_section_with_custom_priority() {
+        let dir = "/tmp/lumin-prompt-custom";
+        let _ = fs::create_dir_all(dir);
+
+        let mut b = PromptBuilder::new(dir);
+        b.add_runtime_info(None, None, None);  // priority 3
+
+        b.add_section(PromptSection {
+            id: "custom".into(),
+            content: "CUSTOM_HIGH_PRIORITY".into(),
+            priority: 100.0,
+        });
+
+        b.add_section(PromptSection {
+            id: "custom-low".into(),
+            content: "CUSTOM_LOW_PRIORITY".into(),
+            priority: 1.0,
+        });
+
+        let prompt = b.build();
+        let high_pos = prompt.find("CUSTOM_HIGH_PRIORITY").unwrap();
+        let runtime_pos = prompt.find("Runtime Info").unwrap();
+        let low_pos = prompt.find("CUSTOM_LOW_PRIORITY").unwrap();
+
+        assert!(high_pos < runtime_pos, "high priority custom before runtime");
+        assert!(runtime_pos < low_pos, "runtime before low priority custom");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn add_memory_context_skips_empty_string() {
+        let dir = "/tmp/lumin-prompt-memory";
+        let _ = fs::create_dir_all(dir);
+
+        let mut b = PromptBuilder::new(dir);
+        b.add_memory_context("");
+        let prompt = b.build();
+        assert!(!prompt.contains("Recent Memory"), "empty memory should not add a section");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn add_memory_context_adds_non_empty() {
+        let dir = "/tmp/lumin-prompt-memory2";
+        let _ = fs::create_dir_all(dir);
+
+        let mut b = PromptBuilder::new(dir);
+        b.add_memory_context("User prefers Rust.");
+        let prompt = b.build();
+        assert!(prompt.contains("Recent Memory"));
+        assert!(prompt.contains("User prefers Rust."));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn add_skill_sections_adds_multiple() {
+        let dir = "/tmp/lumin-prompt-skills";
+        let _ = fs::create_dir_all(dir);
+
+        let mut b = PromptBuilder::new(dir);
+        b.add_skill_sections(vec![
+            ("latex".into(), "Compile LaTeX documents.".into()),
+            ("jupyter".into(), "Run Jupyter notebooks.".into()),
+        ]);
+
+        let prompt = b.build();
+        assert!(prompt.contains("Skill: latex"));
+        assert!(prompt.contains("Compile LaTeX documents."));
+        assert!(prompt.contains("Skill: jupyter"));
+        assert!(prompt.contains("Run Jupyter notebooks."));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn add_skill_sections_empty_is_noop() {
+        let dir = "/tmp/lumin-prompt-skills-empty";
+        let _ = fs::create_dir_all(dir);
+
+        let mut b = PromptBuilder::new(dir);
+        b.add_skill_sections(vec![]);
+        let prompt = b.build();
+        assert!(!prompt.contains("Skill:"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn set_workspace_context_adds_section() {
+        let dir = "/tmp/lumin-prompt-workspace";
+        let _ = fs::create_dir_all(dir);
+
+        let mut b = PromptBuilder::new(dir);
+        b.set_workspace_context("Project uses Next.js 14.");
+
+        let prompt = b.build();
+        assert!(prompt.contains("Workspace"));
+        assert!(prompt.contains("Project uses Next.js 14."));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn set_agent_instructions_adds_section() {
+        let dir = "/tmp/lumin-prompt-instructions";
+        let _ = fs::create_dir_all(dir);
+
+        let mut b = PromptBuilder::new(dir);
+        b.set_agent_instructions("Always respond in JSON format.");
+
+        let prompt = b.build();
+        assert!(prompt.contains("Instructions"));
+        assert!(prompt.contains("Always respond in JSON format."));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn user_profile_loads_when_present() {
+        let dir = "/tmp/lumin-prompt-user";
+        let _ = fs::create_dir_all(dir);
+        fs::write(format!("{dir}/USER.md"), "Name: Alice\nRole: PhD student").unwrap();
+
+        let mut b = PromptBuilder::new(dir);
+        b.load_user_profile();
+
+        let prompt = b.build();
+        assert!(prompt.contains("User Profile"));
+        assert!(prompt.contains("Alice"));
+        assert!(prompt.contains("PhD student"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn build_empty_builder_returns_empty() {
+        let dir = "/tmp/lumin-prompt-empty";
+        let _ = fs::create_dir_all(dir);
+
+        let b = PromptBuilder::new(dir);
+        let prompt = b.build();
+        assert!(prompt.is_empty());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sections_separated_by_divider() {
+        let dir = "/tmp/lumin-prompt-divider";
+        let _ = fs::create_dir_all(dir);
+
+        let mut b = PromptBuilder::new(dir);
+        b.add_section(PromptSection {
+            id: "a".into(),
+            content: "Section A".into(),
+            priority: 10.0,
+        });
+        b.add_section(PromptSection {
+            id: "b".into(),
+            content: "Section B".into(),
+            priority: 5.0,
+        });
+
+        let prompt = b.build();
+        assert!(prompt.contains("---"), "sections should be separated by ---");
+        // Verify ordering
+        let a_pos = prompt.find("Section A").unwrap();
+        let b_pos = prompt.find("Section B").unwrap();
+        assert!(a_pos < b_pos);
 
         let _ = fs::remove_dir_all(dir);
     }

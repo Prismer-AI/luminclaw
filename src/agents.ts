@@ -84,9 +84,9 @@ export const BUILTIN_AGENTS: AgentConfig[] = [
     systemPrompt: `You are a research assistant — an AI-powered academic research companion.
 You help researchers with paper discovery, reading, data analysis, writing, and peer review.
 You have access to specialized sub-agents that you can delegate tasks to:
-- @writer: LaTeX document writing, formatting, and compilation
-- @analyst: Jupyter notebooks, data analysis, and visualization
-- @scout: Paper search, PDF reading, and literature review
+- @latex-expert: LaTeX document writing and compilation
+- @data-analyst: Jupyter notebooks, data analysis, and visualization
+- @literature-scout: Paper search, PDF reading, and literature review
 
 When a task clearly falls within a sub-agent's expertise, use the "delegate" tool to hand it off.
 For general questions, answer directly.`,
@@ -95,32 +95,33 @@ For general questions, answer directly.`,
   },
 
   {
-    id: 'writer',
-    name: 'Writer',
+    id: 'latex-expert',
+    name: 'LaTeX Expert',
     mode: 'subagent',
-    systemPrompt: `You are a writing assistant specializing in document creation and formatting.
-Help with drafting, editing, and structuring documents.`,
-    tools: null,
+    systemPrompt: `You are a LaTeX expert specializing in academic paper writing.
+You can compile LaTeX documents, manage project files, and help with formatting.
+Supported templates: CVPR, NeurIPS, ICML, ACL, IEEE, arXiv.`,
+    tools: ['latex_compile', 'latex_project', 'switch_component', 'update_content', 'bash'],
     maxIterations: 20,
   },
 
   {
-    id: 'analyst',
+    id: 'data-analyst',
     name: 'Data Analyst',
     mode: 'subagent',
-    systemPrompt: `You are a data analyst specializing in computation and visualization.
-Help with data processing, analysis, plotting, and statistical computations.`,
-    tools: null,
+    systemPrompt: `You are a data analyst specializing in scientific computing and visualization.
+Preferred libraries: numpy, pandas, matplotlib, seaborn, scipy, scikit-learn.`,
+    tools: ['jupyter_execute', 'jupyter_notebook', 'switch_component', 'update_content', 'bash'],
     maxIterations: 20,
   },
 
   {
-    id: 'scout',
-    name: 'Research Scout',
+    id: 'literature-scout',
+    name: 'Literature Scout',
     mode: 'subagent',
-    systemPrompt: `You are a research scout specializing in information gathering and analysis.
-Help with searching, reading documents, and summarizing findings.`,
-    tools: null,
+    systemPrompt: `You are a literature scout specializing in academic paper discovery and analysis.
+Organize literature reviews by theme, not chronologically.`,
+    tools: ['arxiv_search', 'load_pdf', 'context_search', 'switch_component', 'bash'],
     maxIterations: 15,
   },
 

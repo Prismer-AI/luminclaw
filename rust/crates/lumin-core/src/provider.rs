@@ -1,8 +1,9 @@
-//! OpenAI-compatible LLM provider — with SSE streaming support.
+//! OpenAI-compatible LLM provider — with SSE streaming support and fallback.
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use futures::StreamExt;
+use tracing::warn;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -15,8 +16,9 @@ pub struct Message {
     /// Tool call ID for role="tool" messages.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
-    /// Reasoning content — required by Kimi K2.5 for assistant tool call messages.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Reasoning content — stored internally but NOT sent back to API.
+    /// Many providers reject unknown properties on assistant messages.
+    #[serde(skip_serializing)]
     pub reasoning_content: Option<String>,
 }
 
@@ -31,7 +33,7 @@ impl Message {
         Self { role: "assistant".into(), content: Some(content.into()), tool_calls: None, tool_call_id: None, reasoning_content: None }
     }
     pub fn assistant_with_tools(tool_calls: Vec<serde_json::Value>, reasoning: Option<String>) -> Self {
-        Self { role: "assistant".into(), content: Some(String::new()), tool_calls: Some(tool_calls), tool_call_id: None, reasoning_content: reasoning }
+        Self { role: "assistant".into(), content: None, tool_calls: Some(tool_calls), tool_call_id: None, reasoning_content: reasoning }
     }
     pub fn tool_result(tool_call_id: &str, content: &str) -> Self {
         Self { role: "tool".into(), content: Some(content.into()), tool_calls: None, tool_call_id: Some(tool_call_id.into()), reasoning_content: None }
@@ -63,6 +65,7 @@ pub struct ChatResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct Usage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
@@ -197,8 +200,9 @@ impl OpenAIProvider {
                                 }
                             }
 
-                            // Reasoning/thinking delta
-                            if let Some(reasoning) = delta["reasoning_content"].as_str() {
+                            // Reasoning/thinking delta (reasoning_content or reasoning)
+                            if let Some(reasoning) = delta["reasoning_content"].as_str()
+                                .or_else(|| delta["reasoning"].as_str()) {
                                 if !reasoning.is_empty() {
                                     thinking_parts.push(reasoning.to_string());
                                 }
@@ -261,12 +265,11 @@ impl OpenAIProvider {
             })
             .collect();
 
-        Ok(ChatResponse {
-            text: text_parts.join(""),
-            tool_calls: parsed_tool_calls,
-            thinking: if thinking_parts.is_empty() { None } else { Some(thinking_parts.join("")) },
-            usage,
-        })
+        let text = text_parts.join("");
+        let thinking = if thinking_parts.is_empty() { None } else { Some(thinking_parts.join("")) };
+        // Some models put all content in reasoning with empty content — use thinking as fallback
+        let text = if text.is_empty() { thinking.clone().unwrap_or_default() } else { text };
+        Ok(ChatResponse { text, tool_calls: parsed_tool_calls, thinking, usage })
     }
 
     fn parse_response(text: &str) -> Result<ChatResponse, ProviderError> {
@@ -275,8 +278,16 @@ impl OpenAIProvider {
 
         let choice = &json["choices"][0];
         let message = &choice["message"];
-        let response_text = message["content"].as_str().unwrap_or("").to_string();
-        let thinking = message["reasoning_content"].as_str().map(|s| s.to_string());
+        let raw_text = message["content"].as_str().unwrap_or("").to_string();
+        let thinking = message["reasoning_content"].as_str()
+            .or_else(|| message["reasoning"].as_str())
+            .map(|s| s.to_string());
+        // Some models put all content in reasoning with empty content — use thinking as fallback
+        let response_text = if raw_text.is_empty() {
+            thinking.clone().unwrap_or_default()
+        } else {
+            raw_text
+        };
 
         let mut tool_calls = Vec::new();
         if let Some(tcs) = message["tool_calls"].as_array() {
@@ -319,3 +330,465 @@ impl Provider for OpenAIProvider {
 
     fn name(&self) -> &str { "openai-compatible" }
 }
+
+// ── Tests ────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── Message constructors ──
+
+    #[test]
+    fn message_system() {
+        let msg = Message::system("You are helpful.");
+        assert_eq!(msg.role, "system");
+        assert_eq!(msg.content.as_deref(), Some("You are helpful."));
+        assert!(msg.tool_calls.is_none());
+        assert!(msg.tool_call_id.is_none());
+        assert!(msg.reasoning_content.is_none());
+    }
+
+    #[test]
+    fn message_user() {
+        let msg = Message::user("Hello!");
+        assert_eq!(msg.role, "user");
+        assert_eq!(msg.content.as_deref(), Some("Hello!"));
+    }
+
+    #[test]
+    fn message_assistant() {
+        let msg = Message::assistant("Sure, I can help.");
+        assert_eq!(msg.role, "assistant");
+        assert_eq!(msg.content.as_deref(), Some("Sure, I can help."));
+        assert!(msg.tool_calls.is_none());
+    }
+
+    #[test]
+    fn message_assistant_with_tools() {
+        let tc = vec![json!({"id": "tc1", "function": {"name": "bash", "arguments": "{\"cmd\":\"ls\"}"}})];
+        let msg = Message::assistant_with_tools(tc.clone(), Some("thinking about it".into()));
+        assert_eq!(msg.role, "assistant");
+        assert!(msg.content.is_none());
+        assert_eq!(msg.tool_calls.as_ref().unwrap().len(), 1);
+        assert_eq!(msg.reasoning_content.as_deref(), Some("thinking about it"));
+    }
+
+    #[test]
+    fn message_tool_result() {
+        let msg = Message::tool_result("call_123", "result output");
+        assert_eq!(msg.role, "tool");
+        assert_eq!(msg.content.as_deref(), Some("result output"));
+        assert_eq!(msg.tool_call_id.as_deref(), Some("call_123"));
+    }
+
+    // ── Message serialization ──
+
+    #[test]
+    fn message_serialization_skips_none_fields() {
+        let msg = Message::user("hi");
+        let json_val = serde_json::to_value(&msg).unwrap();
+
+        // Should have role and content
+        assert_eq!(json_val["role"], "user");
+        assert_eq!(json_val["content"], "hi");
+
+        // None fields should be absent (skip_serializing_if)
+        assert!(json_val.get("tool_calls").is_none());
+        assert!(json_val.get("tool_call_id").is_none());
+
+        // reasoning_content uses skip_serializing (always skipped)
+        assert!(json_val.get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn message_serialization_reasoning_always_skipped() {
+        // reasoning_content should never be serialized, even when Some
+        let msg = Message {
+            role: "assistant".into(),
+            content: Some("reply".into()),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: Some("deep thoughts".into()),
+        };
+        let json_val = serde_json::to_value(&msg).unwrap();
+        assert!(json_val.get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn message_serialization_includes_tool_calls_when_present() {
+        let tc = vec![json!({"id": "tc1"})];
+        let msg = Message::assistant_with_tools(tc, None);
+        let json_val = serde_json::to_value(&msg).unwrap();
+        assert!(json_val.get("tool_calls").is_some());
+        assert_eq!(json_val["tool_calls"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn message_serialization_includes_tool_call_id_when_present() {
+        let msg = Message::tool_result("call_abc", "output");
+        let json_val = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json_val["tool_call_id"], "call_abc");
+    }
+
+    // ── ChatRequest clone ──
+
+    #[test]
+    fn chat_request_clone() {
+        let req = ChatRequest {
+            messages: vec![Message::user("hello")],
+            tools: Some(vec![json!({"type": "function"})]),
+            model: Some("gpt-4o".into()),
+            max_tokens: Some(1024),
+            stream: false,
+        };
+        let cloned = req.clone();
+        assert_eq!(cloned.messages.len(), 1);
+        assert_eq!(cloned.messages[0].content.as_deref(), Some("hello"));
+        assert_eq!(cloned.model.as_deref(), Some("gpt-4o"));
+        assert_eq!(cloned.max_tokens, Some(1024));
+        assert!(!cloned.stream);
+        assert_eq!(cloned.tools.as_ref().unwrap().len(), 1);
+    }
+
+    // ── parse_response ──
+
+    #[test]
+    fn parse_response_text_only() {
+        let raw = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Hello, world!"
+                }
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5
+            }
+        });
+        let resp = OpenAIProvider::parse_response(&raw.to_string()).unwrap();
+        assert_eq!(resp.text, "Hello, world!");
+        assert!(resp.tool_calls.is_empty());
+        assert!(resp.thinking.is_none());
+        assert_eq!(resp.usage.as_ref().unwrap().prompt_tokens, 10);
+        assert_eq!(resp.usage.as_ref().unwrap().completion_tokens, 5);
+    }
+
+    #[test]
+    fn parse_response_with_tool_calls() {
+        let raw = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "bash",
+                            "arguments": "{\"cmd\":\"ls -la\"}"
+                        }
+                    }]
+                }
+            }]
+        });
+        let resp = OpenAIProvider::parse_response(&raw.to_string()).unwrap();
+        assert_eq!(resp.tool_calls.len(), 1);
+        assert_eq!(resp.tool_calls[0].id, "call_1");
+        assert_eq!(resp.tool_calls[0].name, "bash");
+        assert_eq!(resp.tool_calls[0].arguments["cmd"], "ls -la");
+    }
+
+    #[test]
+    fn parse_response_with_reasoning_content() {
+        let raw = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "The answer is 42.",
+                    "reasoning_content": "Let me think step by step..."
+                }
+            }]
+        });
+        let resp = OpenAIProvider::parse_response(&raw.to_string()).unwrap();
+        assert_eq!(resp.text, "The answer is 42.");
+        assert_eq!(resp.thinking.as_deref(), Some("Let me think step by step..."));
+    }
+
+    #[test]
+    fn parse_response_with_reasoning_field() {
+        // Some providers use "reasoning" instead of "reasoning_content"
+        let raw = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Result here.",
+                    "reasoning": "Deep thought process..."
+                }
+            }]
+        });
+        let resp = OpenAIProvider::parse_response(&raw.to_string()).unwrap();
+        assert_eq!(resp.text, "Result here.");
+        assert_eq!(resp.thinking.as_deref(), Some("Deep thought process..."));
+    }
+
+    #[test]
+    fn parse_response_empty_content_reasoning_fallback() {
+        // When content is empty but reasoning_content exists, text should fall back to reasoning
+        let raw = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": "All my reasoning goes here"
+                }
+            }]
+        });
+        let resp = OpenAIProvider::parse_response(&raw.to_string()).unwrap();
+        assert_eq!(resp.text, "All my reasoning goes here");
+        assert_eq!(resp.thinking.as_deref(), Some("All my reasoning goes here"));
+    }
+
+    #[test]
+    fn parse_response_null_content_reasoning_fallback() {
+        // When content is null (missing) and reasoning exists
+        let raw = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "reasoning_content": "Thinking only output"
+                }
+            }]
+        });
+        let resp = OpenAIProvider::parse_response(&raw.to_string()).unwrap();
+        assert_eq!(resp.text, "Thinking only output");
+    }
+
+    #[test]
+    fn parse_response_no_usage() {
+        let raw = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "no usage"
+                }
+            }]
+        });
+        let resp = OpenAIProvider::parse_response(&raw.to_string()).unwrap();
+        assert!(resp.usage.is_none());
+    }
+
+    #[test]
+    fn parse_response_invalid_json() {
+        let result = OpenAIProvider::parse_response("not json at all");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ProviderError::Parse(_) => {} // expected
+            other => panic!("Expected Parse error, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_response_multiple_tool_calls() {
+        let raw = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "function": { "name": "bash", "arguments": "{\"cmd\":\"echo a\"}" }
+                        },
+                        {
+                            "id": "call_2",
+                            "function": { "name": "read_file", "arguments": "{\"path\":\"/tmp/x\"}" }
+                        }
+                    ]
+                }
+            }]
+        });
+        let resp = OpenAIProvider::parse_response(&raw.to_string()).unwrap();
+        assert_eq!(resp.tool_calls.len(), 2);
+        assert_eq!(resp.tool_calls[0].name, "bash");
+        assert_eq!(resp.tool_calls[1].name, "read_file");
+    }
+
+    // ── FallbackProvider::is_retryable ──
+
+    #[test]
+    fn is_retryable_429() {
+        let err = ProviderError::Http { status: 429, body: "rate limit".into() };
+        assert!(FallbackProvider::is_retryable(&err));
+    }
+
+    #[test]
+    fn is_retryable_500() {
+        let err = ProviderError::Http { status: 500, body: "internal error".into() };
+        assert!(FallbackProvider::is_retryable(&err));
+    }
+
+    #[test]
+    fn is_retryable_503() {
+        let err = ProviderError::Http { status: 503, body: "unavailable".into() };
+        assert!(FallbackProvider::is_retryable(&err));
+    }
+
+    #[test]
+    fn is_retryable_502() {
+        let err = ProviderError::Http { status: 502, body: "bad gateway".into() };
+        assert!(FallbackProvider::is_retryable(&err));
+    }
+
+    #[test]
+    fn is_retryable_504() {
+        let err = ProviderError::Http { status: 504, body: "gateway timeout".into() };
+        assert!(FallbackProvider::is_retryable(&err));
+    }
+
+    #[test]
+    fn is_not_retryable_400() {
+        let err = ProviderError::Http { status: 400, body: "bad request".into() };
+        assert!(!FallbackProvider::is_retryable(&err));
+    }
+
+    #[test]
+    fn is_not_retryable_401() {
+        let err = ProviderError::Http { status: 401, body: "unauthorized".into() };
+        assert!(!FallbackProvider::is_retryable(&err));
+    }
+
+    #[test]
+    fn is_not_retryable_403() {
+        let err = ProviderError::Http { status: 403, body: "forbidden".into() };
+        assert!(!FallbackProvider::is_retryable(&err));
+    }
+
+    #[test]
+    fn is_not_retryable_404() {
+        let err = ProviderError::Http { status: 404, body: "not found".into() };
+        assert!(!FallbackProvider::is_retryable(&err));
+    }
+
+    #[test]
+    fn is_retryable_network_error() {
+        let err = ProviderError::Network("connection reset".into());
+        assert!(FallbackProvider::is_retryable(&err));
+    }
+
+    #[test]
+    fn is_not_retryable_parse_error() {
+        let err = ProviderError::Parse("invalid json".into());
+        assert!(!FallbackProvider::is_retryable(&err));
+    }
+
+    // ── Usage defaults ──
+
+    #[test]
+    fn usage_default_values() {
+        let usage = Usage::default();
+        assert_eq!(usage.prompt_tokens, 0);
+        assert_eq!(usage.completion_tokens, 0);
+    }
+
+    // ── ChatResponse defaults ──
+
+    #[test]
+    fn chat_response_default() {
+        let resp = ChatResponse::default();
+        assert_eq!(resp.text, "");
+        assert!(resp.tool_calls.is_empty());
+        assert!(resp.thinking.is_none());
+        assert!(resp.usage.is_none());
+    }
+
+    // ── ProviderError display ──
+
+    #[test]
+    fn provider_error_display_http() {
+        let err = ProviderError::Http { status: 500, body: "oops".into() };
+        assert_eq!(format!("{err}"), "HTTP error 500: oops");
+    }
+
+    #[test]
+    fn provider_error_display_network() {
+        let err = ProviderError::Network("timeout".into());
+        assert_eq!(format!("{err}"), "Network error: timeout");
+    }
+
+    #[test]
+    fn provider_error_display_parse() {
+        let err = ProviderError::Parse("bad json".into());
+        assert_eq!(format!("{err}"), "Parse error: bad json");
+    }
+}
+
+// ── FallbackProvider ─────────────────────────────────────
+
+/// Wraps a base provider with retry and model fallback chain.
+/// Retries on 429 (rate limit) and 5xx (server error); tries fallback models in order.
+pub struct FallbackProvider {
+    base: OpenAIProvider,
+    fallback_models: Vec<String>,
+    max_retries: u32,
+}
+
+impl FallbackProvider {
+    pub fn new(base: OpenAIProvider, fallback_models: Vec<String>) -> Self {
+        Self { base, fallback_models, max_retries: 2 }
+    }
+
+    fn is_retryable(err: &ProviderError) -> bool {
+        match err {
+            ProviderError::Http { status, .. } => {
+                *status == 429 || (500..=504).contains(status)
+            }
+            ProviderError::Network(_) => true,
+            ProviderError::Parse(_) => false,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for FallbackProvider {
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ProviderError> {
+        // Try primary model
+        let mut last_error = None;
+        for attempt in 0..=self.max_retries {
+            match self.base.chat(request.clone()).await {
+                Ok(response) => return Ok(response),
+                Err(e) => {
+                    if Self::is_retryable(&e) {
+                        warn!(attempt, error = %e, "retryable error, will try again");
+                        last_error = Some(e);
+                        // Exponential backoff: 500ms, 1000ms
+                        tokio::time::sleep(Duration::from_millis(500 * (1 << attempt))).await;
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+
+        // Try fallback models
+        for fallback_model in &self.fallback_models {
+            warn!(model = %fallback_model, "trying fallback model");
+            let mut fallback_request = request.clone();
+            fallback_request.model = Some(fallback_model.clone());
+            match self.base.chat(fallback_request).await {
+                Ok(response) => return Ok(response),
+                Err(e) => {
+                    warn!(model = %fallback_model, error = %e, "fallback model failed");
+                    last_error = Some(e);
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or(ProviderError::Network("All models exhausted".into())))
+    }
+
+    fn name(&self) -> &str { "fallback" }
+}
+

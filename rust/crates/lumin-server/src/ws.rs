@@ -5,10 +5,13 @@ use axum::{
     extract::{ws::{Message, WebSocket, WebSocketUpgrade}, State},
     response::IntoResponse,
 };
-use lumin_core::provider::{OpenAIProvider, Provider, ChatRequest as LlmRequest, Message as LlmMessage};
+use lumin_core::provider::OpenAIProvider;
+use lumin_core::{PrismerAgent, AgentOptions, ToolRegistry, Session, PromptBuilder};
+use lumin_core::tools::create_bash_tool;
+use lumin_core::sse::{EventBus, AgentEvent};
 use serde_json::json;
 use std::sync::Arc;
-use tracing::{info, error};
+use tracing::error;
 
 use super::AppState;
 
@@ -68,105 +71,83 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
         // Emit lifecycle.start
         let _ = socket.send(Message::Text(json!({"type":"lifecycle.start","sessionId":&session_id}).to_string().into())).await;
 
-        // Run agent
+        // Set up agent infrastructure
         let provider = OpenAIProvider::new(
             &state.config.llm.base_url,
             &state.config.llm.api_key,
             &state.config.llm.model,
         );
 
-        let tool_spec = json!([{
-            "type": "function",
-            "function": {
-                "name": "bash",
-                "description": "Execute a bash command",
-                "parameters": {"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}
-            }
-        }]);
+        let mut tools = ToolRegistry::new();
+        tools.register(create_bash_tool(state.config.workspace.dir.clone()));
 
-        let mut messages = vec![
-            LlmMessage::system("You are a research assistant. Be concise."),
-            LlmMessage::user(content),
-        ];
+        let bus = Arc::new(EventBus::default());
 
-        let mut tools_used: Vec<String> = Vec::new();
-        let mut final_text = String::new();
-        let mut final_thinking = None;
-        let max_iterations = state.config.agent.max_iterations;
+        // Subscribe to bus events and forward to WebSocket
+        let mut rx = bus.subscribe();
 
-        for iter in 1..=max_iterations {
-            info!(iteration = iter, "ws_llm_request");
+        let mut pb = PromptBuilder::new(&state.config.workspace.dir);
+        pb.load_identity();
+        pb.load_tools_ref();
+        pb.load_user_profile();
+        pb.add_runtime_info(Some("researcher"), Some(&state.config.llm.model), Some(tools.size()));
+        let system_prompt = pb.build();
 
-            match provider.chat(LlmRequest {
-                messages: messages.clone(),
-                tools: Some(tool_spec.as_array().unwrap().clone()),
-                model: Some(state.config.llm.model.clone()),
-                max_tokens: Some(state.config.llm.max_tokens),
-                stream: true,
-            }).await {
-                Ok(response) => {
-                    final_text = response.text.clone();
-                    final_thinking = response.thinking.clone();
+        let mut session = Session::new(&session_id);
 
-                    if response.tool_calls.is_empty() {
-                        // Emit text.delta
-                        if !response.text.is_empty() {
-                            let _ = socket.send(Message::Text(json!({"type":"text.delta","delta":&response.text}).to_string().into())).await;
-                        }
-                        messages.push(LlmMessage::assistant(&response.text));
-                        break;
-                    }
+        let agent = PrismerAgent::new(
+            Arc::new(provider),
+            Arc::new(tools),
+            bus.clone(),
+            system_prompt,
+            state.config.llm.model.clone(),
+            "researcher".into(),
+            state.config.workspace.dir.clone(),
+        ).with_options(AgentOptions {
+            max_iterations: state.config.agent.max_iterations,
+            max_context_chars: state.config.agent.max_context_chars,
+            ..AgentOptions::default()
+        });
 
-                    // Has tool calls
-                    let tc_json: Vec<serde_json::Value> = response.tool_calls.iter().map(|tc| {
-                        json!({"id":tc.id,"type":"function","function":{"name":tc.name,"arguments":serde_json::to_string(&tc.arguments).unwrap_or_default()}})
-                    }).collect();
-                    messages.push(LlmMessage::assistant_with_tools(tc_json, response.thinking.clone()));
+        // Run agent and collect events
+        let result = agent.process_message(content, &mut session).await;
 
-                    for tc in &response.tool_calls {
-                        tools_used.push(tc.name.clone());
-
-                        // Emit tool.start
-                        let _ = socket.send(Message::Text(json!({"type":"tool.start","tool":&tc.name,"toolId":&tc.id}).to_string().into())).await;
-
-                        let result = if tc.name == "bash" {
-                            let cmd = tc.arguments["command"].as_str().unwrap_or("");
-                            match tokio::process::Command::new("/bin/sh").arg("-c").arg(cmd)
-                                .current_dir(&state.config.workspace.dir).output().await {
-                                Ok(o) => {
-                                    let s = String::from_utf8_lossy(if o.status.success() { &o.stdout } else { &o.stderr });
-                                    s[..s.len().min(10_000)].to_string()
-                                }
-                                Err(e) => format!("Error: {e}"),
-                            }
-                        } else {
-                            format!("Error: unknown tool '{}'", tc.name)
-                        };
-
-                        // Emit tool.end
-                        let _ = socket.send(Message::Text(json!({"type":"tool.end","tool":&tc.name,"toolId":&tc.id,"result":&result[..result.len().min(200)]}).to_string().into())).await;
-
-                        messages.push(LlmMessage::tool_result(&tc.id, &result));
-                    }
-                }
-                Err(e) => {
-                    error!(error = %e, "ws_llm_error");
-                    let _ = socket.send(Message::Text(json!({"type":"error","message":e.to_string()}).to_string().into())).await;
-                    final_text = format!("Error: {e}");
-                    break;
-                }
-            }
+        // Drain bus events and forward to WebSocket
+        while let Ok(event) = rx.try_recv() {
+            let ws_msg = match event.event_type.as_str() {
+                "text.delta" => json!({"type":"text.delta","delta": event.data["delta"]}),
+                "tool.start" => json!({"type":"tool.start","tool": event.data["tool"],"toolId": event.data["toolId"]}),
+                "tool.end" => json!({"type":"tool.end","tool": event.data["tool"],"toolId": event.data["toolId"],"result": event.data["result"]}),
+                "error" => json!({"type":"error","message": event.data["error"]}),
+                _ => continue,
+            };
+            let _ = socket.send(Message::Text(ws_msg.to_string().into())).await;
         }
 
         // Emit chat.final
-        let _ = socket.send(Message::Text(json!({
-            "type": "chat.final",
-            "content": final_text,
-            "thinking": final_thinking,
-            "toolsUsed": tools_used,
-            "sessionId": session_id,
-            "runtime": "lumin-rust",
-        }).to_string().into())).await;
+        match result {
+            Ok(result) => {
+                let _ = socket.send(Message::Text(json!({
+                    "type": "chat.final",
+                    "content": result.text,
+                    "thinking": result.thinking,
+                    "toolsUsed": result.tools_used,
+                    "sessionId": session_id,
+                    "runtime": "lumin-rust",
+                }).to_string().into())).await;
+            }
+            Err(e) => {
+                error!(error = %e, "ws_agent_error");
+                let _ = socket.send(Message::Text(json!({
+                    "type": "chat.final",
+                    "content": format!("Error: {e}"),
+                    "thinking": null,
+                    "toolsUsed": [],
+                    "sessionId": session_id,
+                    "runtime": "lumin-rust",
+                }).to_string().into())).await;
+            }
+        }
     }
 }
 

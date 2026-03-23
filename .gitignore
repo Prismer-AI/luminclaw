@@ -4,5 +4,6 @@ dist/
 *.env.local
 .env.*
 rust/target/
+tests/output/
 .DS_Store
 .claude/

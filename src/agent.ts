@@ -13,7 +13,7 @@
  * @module agent
  */
 
-import type { Provider, ChatResponse, Message, ToolSpec, ThinkingLevel } from './provider.js';
+import type { Provider, ChatResponse, Message, ToolSpec, ThinkingLevel, ContentBlock } from './provider.js';
 import type { ToolRegistry, ToolContext } from './tools.js';
 import type { Observer } from './observer.js';
 import type { AgentConfig, AgentRegistry } from './agents.js';
@@ -273,8 +273,20 @@ export class PrismerAgent {
       return result;
     }
 
-    // Build messages with system prompt + memory + history + optional images
-    const messages = session.buildMessages(cleanInput, this.systemPrompt, memoryContext, images);
+    // Persist user input to session (before buildMessages so it's included in history)
+    if (images && images.length > 0) {
+      const contentBlocks: ContentBlock[] = [];
+      if (cleanInput) contentBlocks.push({ type: 'text', text: cleanInput });
+      for (const img of images) {
+        contentBlocks.push({ type: 'image_url', image_url: { url: img.url, detail: 'auto' } });
+      }
+      session.addMessage({ role: 'user', content: contentBlocks });
+    } else {
+      session.addMessage({ role: 'user', content: cleanInput });
+    }
+
+    // Build messages with system prompt + memory + history (user input already in session)
+    const messages = session.buildMessages(this.systemPrompt, memoryContext);
 
     // Get tool specs (filter by agent config if sub-agent)
     const agentConfig = this.agents.get(this.agentId);

@@ -141,14 +141,170 @@ pub fn builtin_agents() -> Vec<AgentConfig> {
 mod tests {
     use super::*;
 
+    // ── builtin_agents ──
+
     #[test]
-    fn builtin_agents_count() {
+    fn builtin_agents_has_6_agents() {
         let agents = builtin_agents();
         assert_eq!(agents.len(), 6);
     }
 
     #[test]
-    fn resolve_mention() {
+    fn builtin_agents_ids_are_correct() {
+        let agents = builtin_agents();
+        let ids: Vec<&str> = agents.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["researcher", "latex-expert", "data-analyst", "literature-scout", "compaction", "summarizer"]
+        );
+    }
+
+    #[test]
+    fn researcher_is_primary_with_all_tools() {
+        let agents = builtin_agents();
+        let researcher = agents.iter().find(|a| a.id == "researcher").unwrap();
+        assert_eq!(researcher.mode, AgentMode::Primary);
+        assert!(researcher.tools.is_none()); // None = all tools
+        assert_eq!(researcher.max_iterations, Some(40));
+        assert_eq!(researcher.name, "Research Assistant");
+    }
+
+    #[test]
+    fn subagents_have_restricted_tool_lists() {
+        let agents = builtin_agents();
+
+        let latex = agents.iter().find(|a| a.id == "latex-expert").unwrap();
+        assert_eq!(latex.mode, AgentMode::Subagent);
+        let tools = latex.tools.as_ref().unwrap();
+        assert!(tools.contains(&"latex_compile".to_string()));
+        assert!(tools.contains(&"bash".to_string()));
+        assert_eq!(latex.max_iterations, Some(20));
+
+        let data = agents.iter().find(|a| a.id == "data-analyst").unwrap();
+        assert_eq!(data.mode, AgentMode::Subagent);
+        let tools = data.tools.as_ref().unwrap();
+        assert!(tools.contains(&"jupyter_execute".to_string()));
+        assert!(tools.contains(&"bash".to_string()));
+        assert_eq!(data.max_iterations, Some(20));
+
+        let lit = agents.iter().find(|a| a.id == "literature-scout").unwrap();
+        assert_eq!(lit.mode, AgentMode::Subagent);
+        let tools = lit.tools.as_ref().unwrap();
+        assert!(tools.contains(&"arxiv_search".to_string()));
+        assert!(tools.contains(&"load_pdf".to_string()));
+        assert_eq!(lit.max_iterations, Some(15));
+    }
+
+    #[test]
+    fn hidden_agents_have_empty_tool_lists() {
+        let agents = builtin_agents();
+
+        let compaction = agents.iter().find(|a| a.id == "compaction").unwrap();
+        assert_eq!(compaction.mode, AgentMode::Hidden);
+        assert_eq!(compaction.tools.as_ref().unwrap().len(), 0);
+        assert_eq!(compaction.max_iterations, Some(1));
+
+        let summarizer = agents.iter().find(|a| a.id == "summarizer").unwrap();
+        assert_eq!(summarizer.mode, AgentMode::Hidden);
+        assert_eq!(summarizer.tools.as_ref().unwrap().len(), 0);
+        assert_eq!(summarizer.max_iterations, Some(1));
+    }
+
+    // ── AgentRegistry register and get ──
+
+    #[test]
+    fn registry_register_and_get() {
+        let mut reg = AgentRegistry::new();
+        let config = AgentConfig {
+            id: "test-agent".into(),
+            name: "Test Agent".into(),
+            mode: AgentMode::Primary,
+            system_prompt: "You are a test agent.".into(),
+            model: None,
+            tools: None,
+            max_iterations: Some(10),
+        };
+        reg.register(config);
+
+        let retrieved = reg.get("test-agent");
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().id, "test-agent");
+        assert_eq!(retrieved.unwrap().name, "Test Agent");
+    }
+
+    #[test]
+    fn registry_get_returns_none_for_unknown() {
+        let reg = AgentRegistry::new();
+        assert!(reg.get("nonexistent").is_none());
+    }
+
+    // ── list ──
+
+    #[test]
+    fn list_returns_all_agents() {
+        let mut reg = AgentRegistry::new();
+        reg.register_many(builtin_agents());
+        let all = reg.list(None);
+        assert_eq!(all.len(), 6);
+    }
+
+    #[test]
+    fn list_filters_by_primary_mode() {
+        let mut reg = AgentRegistry::new();
+        reg.register_many(builtin_agents());
+
+        let primary = reg.list(Some(&AgentMode::Primary));
+        assert_eq!(primary.len(), 1);
+        assert_eq!(primary[0].id, "researcher");
+    }
+
+    #[test]
+    fn list_filters_by_subagent_mode() {
+        let mut reg = AgentRegistry::new();
+        reg.register_many(builtin_agents());
+
+        let subagents = reg.list(Some(&AgentMode::Subagent));
+        assert_eq!(subagents.len(), 3);
+        let ids: Vec<&str> = subagents.iter().map(|a| a.id.as_str()).collect();
+        assert!(ids.contains(&"latex-expert"));
+        assert!(ids.contains(&"data-analyst"));
+        assert!(ids.contains(&"literature-scout"));
+    }
+
+    #[test]
+    fn list_filters_by_hidden_mode() {
+        let mut reg = AgentRegistry::new();
+        reg.register_many(builtin_agents());
+
+        let hidden = reg.list(Some(&AgentMode::Hidden));
+        assert_eq!(hidden.len(), 2);
+        let ids: Vec<&str> = hidden.iter().map(|a| a.id.as_str()).collect();
+        assert!(ids.contains(&"compaction"));
+        assert!(ids.contains(&"summarizer"));
+    }
+
+    // ── get_delegatable_agents ──
+
+    #[test]
+    fn get_delegatable_agents_returns_only_subagent_ids() {
+        let mut reg = AgentRegistry::new();
+        reg.register_many(builtin_agents());
+        let delegatable = reg.get_delegatable_agents();
+
+        assert_eq!(delegatable.len(), 3);
+        assert!(delegatable.contains(&"latex-expert"));
+        assert!(delegatable.contains(&"data-analyst"));
+        assert!(delegatable.contains(&"literature-scout"));
+        // Should NOT contain primary or hidden
+        assert!(!delegatable.contains(&"researcher"));
+        assert!(!delegatable.contains(&"compaction"));
+        assert!(!delegatable.contains(&"summarizer"));
+    }
+
+    // ── resolve_from_mention ──
+
+    #[test]
+    fn resolve_from_mention_with_valid_mention() {
         let mut reg = AgentRegistry::new();
         reg.register_many(builtin_agents());
 
@@ -160,18 +316,91 @@ mod tests {
     }
 
     #[test]
-    fn hidden_agents_not_mentionable() {
+    fn resolve_from_mention_data_analyst() {
         let mut reg = AgentRegistry::new();
         reg.register_many(builtin_agents());
-        assert!(reg.resolve_from_mention("@compaction summarize").is_none());
+
+        let result = reg.resolve_from_mention("@data-analyst plot sine wave");
+        assert!(result.is_some());
+        let (id, msg) = result.unwrap();
+        assert_eq!(id, "data-analyst");
+        assert_eq!(msg, "plot sine wave");
     }
 
     #[test]
-    fn delegatable_agents() {
+    fn resolve_from_mention_returns_none_for_no_mention() {
         let mut reg = AgentRegistry::new();
         reg.register_many(builtin_agents());
-        let delegatable = reg.get_delegatable_agents();
-        assert_eq!(delegatable.len(), 3);
-        assert!(delegatable.contains(&"latex-expert"));
+
+        assert!(reg.resolve_from_mention("just a regular message").is_none());
+    }
+
+    #[test]
+    fn resolve_from_mention_returns_none_for_unknown_agent() {
+        let mut reg = AgentRegistry::new();
+        reg.register_many(builtin_agents());
+
+        assert!(reg.resolve_from_mention("@unknown-agent do something").is_none());
+    }
+
+    #[test]
+    fn resolve_from_mention_returns_none_for_hidden_agent() {
+        let mut reg = AgentRegistry::new();
+        reg.register_many(builtin_agents());
+
+        assert!(reg.resolve_from_mention("@compaction summarize this").is_none());
+        assert!(reg.resolve_from_mention("@summarizer title this").is_none());
+    }
+
+    #[test]
+    fn resolve_from_mention_returns_none_without_message_content() {
+        let mut reg = AgentRegistry::new();
+        reg.register_many(builtin_agents());
+
+        // No space after agent ID — find(char::is_whitespace) returns None
+        assert!(reg.resolve_from_mention("@latex-expert").is_none());
+    }
+
+    #[test]
+    fn resolve_from_mention_returns_none_for_empty_string() {
+        let mut reg = AgentRegistry::new();
+        reg.register_many(builtin_agents());
+        assert!(reg.resolve_from_mention("").is_none());
+    }
+
+    #[test]
+    fn resolve_from_mention_trims_message_content() {
+        let mut reg = AgentRegistry::new();
+        reg.register_many(builtin_agents());
+
+        let result = reg.resolve_from_mention("@latex-expert   compile this  ");
+        assert!(result.is_some());
+        let (_, msg) = result.unwrap();
+        assert_eq!(msg, "compile this");
+    }
+
+    // ── AgentRegistry default ──
+
+    #[test]
+    fn registry_default_is_empty() {
+        let reg = AgentRegistry::default();
+        assert!(reg.list(None).is_empty());
+    }
+
+    // ── register_many ──
+
+    #[test]
+    fn register_many_registers_all() {
+        let mut reg = AgentRegistry::new();
+        reg.register_many(builtin_agents());
+        assert_eq!(reg.list(None).len(), 6);
+
+        // Can retrieve each by ID
+        assert!(reg.get("researcher").is_some());
+        assert!(reg.get("latex-expert").is_some());
+        assert!(reg.get("data-analyst").is_some());
+        assert!(reg.get("literature-scout").is_some());
+        assert!(reg.get("compaction").is_some());
+        assert!(reg.get("summarizer").is_some());
     }
 }

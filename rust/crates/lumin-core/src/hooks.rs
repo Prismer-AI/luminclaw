@@ -113,3 +113,131 @@ impl HookRegistry {
 impl Default for HookRegistry {
     fn default() -> Self { Self::new() }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn make_ctx() -> HookContext {
+        HookContext {
+            workspace_dir: "/tmp/test".into(),
+            session_id: "s1".into(),
+            agent_id: "agent1".into(),
+        }
+    }
+
+    #[test]
+    fn new_is_empty() {
+        let registry = HookRegistry::new();
+        assert!(!registry.has_hooks());
+    }
+
+    #[test]
+    fn has_hooks_returns_false_when_empty() {
+        let registry = HookRegistry::default();
+        assert!(!registry.has_hooks());
+    }
+
+    #[tokio::test]
+    async fn register_before_prompt_and_run_it() {
+        let mut registry = HookRegistry::new();
+        let hook: AsyncHookFn<String, String> = Arc::new(|_ctx, prompt| {
+            Box::pin(async move { prompt })
+        });
+        registry.on_before_prompt(hook);
+        assert!(registry.has_hooks());
+
+        let result = registry.run_before_prompt(make_ctx(), "hello".into()).await;
+        assert_eq!(result, "hello");
+    }
+
+    #[tokio::test]
+    async fn before_prompt_modifies_prompt_string() {
+        let mut registry = HookRegistry::new();
+        let hook: AsyncHookFn<String, String> = Arc::new(|_ctx, prompt| {
+            Box::pin(async move { format!("{prompt} [modified]") })
+        });
+        registry.on_before_prompt(hook);
+
+        let result = registry.run_before_prompt(make_ctx(), "original".into()).await;
+        assert_eq!(result, "original [modified]");
+    }
+
+    #[tokio::test]
+    async fn register_before_tool_and_verify_proceed_true() {
+        let mut registry = HookRegistry::new();
+        let hook: AsyncHookFn<(String, serde_json::Value), BeforeToolResult> = Arc::new(|_ctx, (_tool, args)| {
+            Box::pin(async move {
+                BeforeToolResult { proceed: true, args }
+            })
+        });
+        registry.on_before_tool(hook);
+        assert!(registry.has_hooks());
+
+        let result = registry.run_before_tool(
+            make_ctx(),
+            "bash".into(),
+            serde_json::json!({"cmd": "ls"}),
+        ).await;
+        assert!(result.proceed);
+        assert_eq!(result.args["cmd"], "ls");
+    }
+
+    #[tokio::test]
+    async fn before_tool_can_block() {
+        let mut registry = HookRegistry::new();
+        let hook: AsyncHookFn<(String, serde_json::Value), BeforeToolResult> = Arc::new(|_ctx, (_tool, args)| {
+            Box::pin(async move {
+                BeforeToolResult { proceed: false, args }
+            })
+        });
+        registry.on_before_tool(hook);
+
+        let result = registry.run_before_tool(
+            make_ctx(),
+            "dangerous_tool".into(),
+            serde_json::json!({}),
+        ).await;
+        assert!(!result.proceed);
+    }
+
+    #[tokio::test]
+    async fn after_tool_runs_without_error() {
+        let mut registry = HookRegistry::new();
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let called_clone = called.clone();
+        let hook: AsyncHookFn<(String, String, bool), ()> = Arc::new(move |_ctx, (_tool, _result, _error)| {
+            let called = called_clone.clone();
+            Box::pin(async move {
+                called.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+        });
+        registry.on_after_tool(hook);
+
+        registry.run_after_tool(
+            make_ctx(),
+            "bash".into(),
+            "output".into(),
+            false,
+        ).await;
+        assert!(called.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn agent_end_runs_without_error() {
+        let mut registry = HookRegistry::new();
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let called_clone = called.clone();
+        let hook: AsyncHookFn<(), ()> = Arc::new(move |_ctx, ()| {
+            let called = called_clone.clone();
+            Box::pin(async move {
+                called.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+        });
+        registry.on_agent_end(hook);
+
+        registry.run_agent_end(make_ctx()).await;
+        assert!(called.load(std::sync::atomic::Ordering::SeqCst));
+    }
+}
