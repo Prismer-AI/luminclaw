@@ -35,6 +35,7 @@ pub struct AgentLoopResult {
     pub usage: Option<crate::provider::Usage>,
     pub iterations: u32,
     pub session_id: String,
+    pub task_id: Option<String>,
 }
 
 pub struct AgentLoopCallOpts {
@@ -224,6 +225,7 @@ mod tests {
             usage: Some(crate::provider::Usage { prompt_tokens: 100, completion_tokens: 50 }),
             iterations: 2,
             session_id: "sess-123".into(),
+            task_id: Some("task-1".into()),
         };
         assert_eq!(result.text, "Hello");
         assert_eq!(result.thinking, Some("I thought about it".into()));
@@ -246,6 +248,7 @@ mod tests {
             usage: None,
             iterations: 0,
             session_id: "s1".into(),
+            task_id: None,
         };
         assert_eq!(result.text, "minimal");
         assert!(result.thinking.is_none());

@@ -48,6 +48,8 @@ export interface AgentLoopResult {
   iterations: number;
   /** Resolved session ID (generated if not provided in input). */
   sessionId: string;
+  /** Task ID — present only in dual-loop mode. */
+  taskId?: string;
 }
 
 export interface AgentLoopCallOpts {
@@ -102,6 +104,20 @@ export interface IAgentLoop {
    * Dual-loop: sets a cancellation flag checked at the next tool boundary.
    */
   cancel(): void;
+
+  /**
+   * Return all tasks from the task store (if available).
+   * Single-loop: returns empty array.
+   * Dual-loop: returns tasks from InMemoryTaskStore.
+   */
+  getTasks?(): { id: string; sessionId: string; instruction: string; status: string; result?: string; error?: string; createdAt: number; updatedAt: number }[];
+
+  /**
+   * Return a single task by ID (if available).
+   * Single-loop: returns undefined.
+   * Dual-loop: returns the task from InMemoryTaskStore.
+   */
+  getTask?(id: string): { id: string; sessionId: string; instruction: string; status: string; artifactIds: string[]; checkpoints: unknown[]; result?: string; error?: string; createdAt: number; updatedAt: number } | undefined;
 
   /** Graceful shutdown — wait for in-flight work to settle. */
   shutdown(): Promise<void>;

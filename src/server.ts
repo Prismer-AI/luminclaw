@@ -35,6 +35,7 @@ import { createLogger } from './log.js';
 import { VERSION } from './version.js';
 import { createAgentLoop, resolveLoopMode } from './loop/factory.js';
 import type { IAgentLoop } from './loop/types.js';
+import type { DualLoopAgent } from './loop/dual.js';
 
 const log = createLogger('server');
 
@@ -271,6 +272,8 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
     usage: result.usage,
     sessionId: result.sessionId,
     iterations: result.iterations,
+    taskId: result.taskId,
+    loopMode: getLoop().mode,
     events: events.length,
   });
 }
@@ -305,6 +308,24 @@ async function handleArtifacts(req: IncomingMessage, res: ServerResponse): Promi
   loop.addArtifact(artifact);
 
   json(res, 200, { artifactId: artifact.id, type: artifact.type, mimeType: artifact.mimeType });
+}
+
+// ── Task Polling Handlers ─────────────────────────────────
+
+async function handleListTasks(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const loop = getLoop();
+  const tasks = loop.getTasks?.() ?? [];
+  json(res, 200, { tasks, count: tasks.length });
+}
+
+async function handleGetTask(req: IncomingMessage, res: ServerResponse, taskId: string): Promise<void> {
+  const loop = getLoop();
+  const task = loop.getTask?.(taskId);
+  if (!task) {
+    json(res, 404, { error: `Task ${taskId} not found` });
+    return;
+  }
+  json(res, 200, task);
 }
 
 // ── WebSocket Handler ────────────────────────────────────
@@ -562,6 +583,11 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         await handleChat(req, res);
       } else if (path === '/v1/artifacts' && method === 'POST') {
         await handleArtifacts(req, res);
+      } else if (path === '/v1/tasks' && method === 'GET') {
+        await handleListTasks(req, res);
+      } else if (path.startsWith('/v1/tasks/') && method === 'GET') {
+        const taskId = path.slice('/v1/tasks/'.length);
+        await handleGetTask(req, res, taskId);
       } else {
         json(res, 404, { error: 'Not found' });
       }

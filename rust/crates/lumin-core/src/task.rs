@@ -141,6 +141,21 @@ impl TaskStore for InMemoryTaskStore {
     }
 }
 
+impl InMemoryTaskStore {
+    /// Evict completed/failed tasks older than `max_age_ms`. Returns count evicted.
+    pub fn evict_completed(&self, max_age_ms: u64) -> usize {
+        let mut map = self.tasks.lock().unwrap();
+        let now = now_ms();
+        let before = map.len();
+        map.retain(|_, t| {
+            !(matches!(t.status, TaskStatus::Completed | TaskStatus::Failed)
+              && t.updated_at > 0
+              && now.saturating_sub(t.updated_at) > max_age_ms)
+        });
+        before - map.len()
+    }
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64
 }

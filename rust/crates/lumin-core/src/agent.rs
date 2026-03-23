@@ -9,7 +9,7 @@ use crate::sse::{EventBus, AgentEvent};
 use crate::directives::Directive;
 use crate::compaction;
 use std::collections::{HashSet, HashMap};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tracing::{info, warn, error};
 
@@ -88,7 +88,12 @@ impl PrismerAgent {
         self.hooks = Some(hooks); self
     }
 
-    pub async fn process_message(&self, input: &str, session: &mut Session) -> Result<AgentResult, String> {
+    pub async fn process_message(
+        &self,
+        input: &str,
+        session: &mut Session,
+        cancelled: Option<Arc<Mutex<bool>>>,
+    ) -> Result<AgentResult, String> {
         let mut tools_used: HashSet<String> = HashSet::new();
         let mut all_directives: Vec<Directive> = Vec::new();
         let mut last_text = String::new();
@@ -110,6 +115,13 @@ impl PrismerAgent {
 
         for iteration in 1..=self.opts.max_iterations {
             actual_iterations = iteration;
+
+            // ── Check cancellation flag ──
+            if let Some(ref flag) = cancelled {
+                if *flag.lock().unwrap() {
+                    return Err("Cancelled by user".into());
+                }
+            }
 
             // ── Build messages from session (user input already in session.messages) ──
             let mut messages = session.build_messages(&self.system_prompt);
@@ -141,6 +153,8 @@ impl PrismerAgent {
                 model: Some(self.model.clone()),
                 max_tokens: Some(8192),
                 stream: true,
+                temperature: None,
+                thinking_level: None,
             }).await {
                 Ok(r) => r,
                 Err(e) => {
@@ -457,7 +471,7 @@ mod tests {
         ]));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-1");
-        let result = agent.process_message("hi", &mut session).await.unwrap();
+        let result = agent.process_message("hi", &mut session, None).await.unwrap();
 
         assert_eq!(result.text, "Hello!");
         assert!(result.tools_used.is_empty());
@@ -484,7 +498,7 @@ mod tests {
         ]));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-2");
-        let result = agent.process_message("echo test", &mut session).await.unwrap();
+        let result = agent.process_message("echo test", &mut session, None).await.unwrap();
 
         assert_eq!(result.text, "Got echo result.");
         assert!(result.tools_used.contains(&"echo".to_string()));
@@ -524,7 +538,7 @@ mod tests {
         ]));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-doom");
-        let result = agent.process_message("do something", &mut session).await.unwrap();
+        let result = agent.process_message("do something", &mut session, None).await.unwrap();
 
         // The doom loop message from the Rust implementation
         assert!(result.text.contains("repeated errors"), "Expected doom loop message, got: {}", result.text);
@@ -557,7 +571,7 @@ mod tests {
         let provider = Arc::new(MockProvider::new(responses));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-repetition");
-        let result = agent.process_message("repeat", &mut session).await.unwrap();
+        let result = agent.process_message("repeat", &mut session, None).await.unwrap();
 
         // After repetition detection triggers (iter 5), the agent continues but
         // all_errors stays true. After 3 consecutive error rounds, doom loop fires.
@@ -613,7 +627,7 @@ mod tests {
         ]));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-different");
-        let result = agent.process_message("various", &mut session).await.unwrap();
+        let result = agent.process_message("various", &mut session, None).await.unwrap();
 
         assert_eq!(result.text, "All done.");
         assert!(!result.text.contains("Stopping"));
@@ -627,7 +641,7 @@ mod tests {
         let provider = Arc::new(FailingProvider);
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-error");
-        let result = agent.process_message("fail", &mut session).await;
+        let result = agent.process_message("fail", &mut session, None).await;
 
         // The Rust agent returns Err on provider failure
         assert!(result.is_err());
@@ -655,7 +669,7 @@ mod tests {
         ]));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-unknown-tool");
-        let result = agent.process_message("use unknown", &mut session).await.unwrap();
+        let result = agent.process_message("use unknown", &mut session, None).await.unwrap();
 
         // Agent should recover — unknown tool returns error, agent continues
         assert_eq!(result.text, "Recovered.");
@@ -692,7 +706,7 @@ mod tests {
         });
 
         let mut session = Session::new("test-max-iter");
-        let result = agent.process_message("loop forever", &mut session).await.unwrap();
+        let result = agent.process_message("loop forever", &mut session, None).await.unwrap();
 
         // Should stop at or before max iterations (5)
         assert!(result.iterations <= 5, "Expected <= 5 iterations, got {}", result.iterations);
@@ -712,7 +726,7 @@ mod tests {
         ]));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-thinking");
-        let result = agent.process_message("think hard", &mut session).await.unwrap();
+        let result = agent.process_message("think hard", &mut session, None).await.unwrap();
 
         assert_eq!(result.text, "Answer.");
         assert_eq!(result.thinking.as_deref(), Some("I need to think about this..."));
@@ -738,7 +752,7 @@ mod tests {
         ]));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-reasoning-roundtrip");
-        let _result = agent.process_message("reason and act", &mut session).await.unwrap();
+        let _result = agent.process_message("reason and act", &mut session, None).await.unwrap();
 
         // Check that the assistant message with tool calls has reasoning_content
         let assistant_msgs: Vec<&Message> = session.messages.iter()
@@ -774,7 +788,7 @@ mod tests {
         ]));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-compact");
-        let result = agent.process_message("get big data", &mut session).await.unwrap();
+        let result = agent.process_message("get big data", &mut session, None).await.unwrap();
 
         // Find the tool result message in session
         let tool_msg = session.messages.iter().find(|m| m.role == "tool");
@@ -807,7 +821,7 @@ mod tests {
         ]));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-no-compact");
-        let _result = agent.process_message("echo", &mut session).await.unwrap();
+        let _result = agent.process_message("echo", &mut session, None).await.unwrap();
 
         let tool_msg = session.messages.iter().find(|m| m.role == "tool");
         assert!(tool_msg.is_some(), "Expected a tool result message");
@@ -837,7 +851,7 @@ mod tests {
         ]));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-usage");
-        let result = agent.process_message("track usage", &mut session).await.unwrap();
+        let result = agent.process_message("track usage", &mut session, None).await.unwrap();
 
         let usage = result.usage.expect("Expected usage to be present");
         assert_eq!(usage.prompt_tokens, 300);

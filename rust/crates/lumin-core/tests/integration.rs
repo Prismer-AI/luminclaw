@@ -32,6 +32,8 @@ async fn t1_basic_conversation() {
         model: Some(model),
         max_tokens: Some(50),
         stream: false,
+        temperature: None,
+        thinking_level: None,
     }).await.unwrap();
 
     assert!(!response.text.is_empty(), "Should return text");
@@ -62,6 +64,8 @@ async fn t2_tool_calling() {
         model: Some(model),
         max_tokens: Some(200),
         stream: true,
+        temperature: None,
+        thinking_level: None,
     }).await.unwrap();
 
     assert!(!response.tool_calls.is_empty(), "Should produce tool calls");
@@ -89,7 +93,7 @@ async fn t3_prismer_agent_basic() {
         "/tmp".into(),
     );
 
-    let result = agent.process_message("Say 'test OK'", &mut session).await.unwrap();
+    let result = agent.process_message("Say 'test OK'", &mut session, None).await.unwrap();
 
     assert!(!result.text.is_empty(), "Agent should return text");
     assert!(result.iterations >= 1, "Should have at least 1 iteration");
@@ -116,7 +120,7 @@ async fn t4_agent_with_tool_use() {
         "/tmp".into(),
     );
 
-    let result = agent.process_message("Run echo 'hello from rust test' and return the output", &mut session).await.unwrap();
+    let result = agent.process_message("Run echo 'hello from rust test' and return the output", &mut session, None).await.unwrap();
 
     assert!(result.tools_used.contains(&"bash".to_string()), "Should have used bash tool");
     assert!(result.text.contains("hello from rust test") || !result.text.is_empty(),
@@ -182,6 +186,8 @@ async fn t7_thinking_model_support() {
         model: Some(model),
         max_tokens: Some(200),
         stream: true,
+        temperature: None,
+        thinking_level: None,
     }).await.unwrap();
 
     assert!(!response.text.is_empty(), "Should return text");

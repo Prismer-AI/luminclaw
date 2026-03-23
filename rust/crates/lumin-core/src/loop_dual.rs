@@ -68,6 +68,9 @@ impl AgentLoop for DualLoopAgent {
             self.artifacts.assign_to_task(&a.id, &task_id);
         }
 
+        // Lazy eviction — remove old completed/failed tasks (24h)
+        self.tasks.evict_completed(24 * 60 * 60 * 1000);
+
         // Create task
         let _task = self.tasks.create(Task {
             id: task_id.clone(),
@@ -123,6 +126,16 @@ impl AgentLoop for DualLoopAgent {
 
             match result {
                 Ok(agent_result) => {
+                    // Extract and persist facts to MemoryStore
+                    let facts = crate::world_model::WorldModel::extract_structured_facts(&agent_result.text, "researcher");
+                    if !facts.is_empty() {
+                        let facts_str = format!("[WorldModel Facts] task={}\n{}",
+                            task_id_clone,
+                            facts.iter().map(|f| format!("{}: {}", f.key, f.value)).collect::<Vec<_>>().join("\n")
+                        );
+                        let _ = crate::MemoryStore::new(&config.workspace.dir).store(&facts_str, &["world-model"]);
+                    }
+
                     // Complete the task
                     if let Some(mut t) = tasks.get(&task_id_clone) {
                         let _ = TaskStateMachine::complete(&mut t, agent_result.text.clone());
@@ -181,6 +194,7 @@ impl AgentLoop for DualLoopAgent {
             usage: None,
             iterations: 0,
             session_id,
+            task_id: Some(task_id),
         })
     }
 
@@ -218,7 +232,7 @@ async fn run_inner_loop(
     session_id: &str,
     task_id: &str,
     world_model: Option<WorldModel>,
-    cancelled: &Mutex<bool>,
+    cancelled: &Arc<Mutex<bool>>,
     bus: &EventBus,
 ) -> Result<crate::agent::AgentResult, String> {
     // Check cancel before starting
@@ -266,7 +280,7 @@ async fn run_inner_loop(
         ..AgentOptions::default()
     });
 
-    agent.process_message(content, &mut session).await
+    agent.process_message(content, &mut session, Some(cancelled.clone())).await
 }
 
 #[cfg(test)]

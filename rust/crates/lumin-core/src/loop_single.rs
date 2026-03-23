@@ -91,7 +91,7 @@ impl AgentLoop for SingleLoopAgent {
             ..AgentOptions::default()
         });
 
-        let result = agent.process_message(&input.content, &mut session).await?;
+        let result = agent.process_message(&input.content, &mut session, None).await?;
 
         // Persist session
         self.sessions.update(session);
@@ -104,6 +104,7 @@ impl AgentLoop for SingleLoopAgent {
             usage: result.usage,
             iterations: result.iterations,
             session_id,
+            task_id: None,
         })
     }
 

@@ -22,6 +22,7 @@ import { TaskStateMachine } from '../task/machine.js';
 import { DirectiveRouter } from './directive-router.js';
 import { AgentViewStack } from './view-stack.js';
 import { createWorldModel, buildHandoffContext, extractStructuredFacts, recordCompletion } from '../world-model/builder.js';
+import { MemoryStore } from '../memory.js';
 import { loadConfig } from '../config.js';
 import { createLogger } from '../log.js';
 import type { IAgentLoop, LoopMode, AgentLoopInput, AgentLoopResult, AgentLoopCallOpts, Artifact } from './types.js';
@@ -38,10 +39,16 @@ export class DualLoopAgent implements IAgentLoop {
   readonly sessions = new SessionStore();
   readonly stateMachine = new TaskStateMachine();
   readonly viewStack = new AgentViewStack();
+  readonly memStore: MemoryStore;
 
   private worldModel: WorldModel | null = null;
   private activeBus: EventBus | null = null;
   private cancelFlag = false;
+
+  constructor() {
+    const cfg = loadConfig();
+    this.memStore = new MemoryStore(cfg.workspace.dir);
+  }
 
   /**
    * Create a task and dispatch to the inner loop.
@@ -70,8 +77,30 @@ export class DualLoopAgent implements IAgentLoop {
       this.artifacts.assignToTask(a.id, taskId);
     }
 
+    // Recall previous world model facts from MemoryStore and seed knowledgeBase
+    const newWorldModel = createWorldModel(taskId, input.content);
+    try {
+      const previousFacts = await this.memStore.recall('world-model', 4000);
+      if (previousFacts) {
+        // Parse recalled facts back into knowledgeBase entries
+        for (const line of previousFacts.split('\n')) {
+          const match = line.match(/^(.+?):\s*(.+)$/);
+          if (match && match[1] && match[2]) {
+            newWorldModel.knowledgeBase.push({
+              key: match[1].trim(),
+              value: match[2].trim(),
+              sourceAgentId: 'memory',
+              confidence: 'medium',
+            });
+          }
+        }
+      }
+    } catch {
+      // Non-fatal — memory recall failure should not block task creation
+    }
+
     // Create world model for this task
-    this.worldModel = createWorldModel(taskId, input.content);
+    this.worldModel = newWorldModel;
 
     // Transition to executing
     this.stateMachine.transition(task, 'executing');
@@ -93,6 +122,7 @@ export class DualLoopAgent implements IAgentLoop {
       toolsUsed: [],
       iterations: 0,
       sessionId,
+      taskId,
     };
   }
 
@@ -191,6 +221,14 @@ export class DualLoopAgent implements IAgentLoop {
         // Background knowledge extraction (fast path only)
         const facts = extractStructuredFacts(result.text, 'researcher');
         facts.forEach(f => this.worldModel!.knowledgeBase.push(f));
+
+        // Persist facts to MemoryStore (Phase C)
+        if (facts.length > 0) {
+          const factsStr = `[WorldModel Facts] task=${task.id}\n${facts.map(f => `${f.key}: ${f.value}`).join('\n')}`;
+          this.memStore.store(factsStr, ['world-model', task.id]).catch(err => {
+            log.warn('failed to persist world model facts', { error: err instanceof Error ? err.message : String(err) });
+          });
+        }
       }
 
       // Complete the task
@@ -228,6 +266,36 @@ export class DualLoopAgent implements IAgentLoop {
     } finally {
       await observer.flush();
     }
+  }
+
+  getTasks() {
+    return this.tasks.list().map(t => ({
+      id: t.id,
+      sessionId: t.sessionId,
+      instruction: t.instruction,
+      status: t.status,
+      result: t.result,
+      error: t.error,
+      createdAt: t.createdAt,
+      updatedAt: t.updatedAt,
+    }));
+  }
+
+  getTask(id: string) {
+    const t = this.tasks.get(id);
+    if (!t) return undefined;
+    return {
+      id: t.id,
+      sessionId: t.sessionId,
+      instruction: t.instruction,
+      status: t.status,
+      artifactIds: t.artifactIds,
+      checkpoints: t.checkpoints,
+      result: t.result,
+      error: t.error,
+      createdAt: t.createdAt,
+      updatedAt: t.updatedAt,
+    };
   }
 
   addArtifact(artifact: Artifact): void {

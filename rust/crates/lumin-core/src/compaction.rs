@@ -61,6 +61,8 @@ pub async fn summarize_dropped(
         model: None,
         max_tokens: Some(200),
         stream: false,
+        temperature: None,
+        thinking_level: None,
     }).await.map_err(|e| e.to_string())?;
 
     Ok(response.text)

@@ -47,6 +47,7 @@ pub(crate) struct AppState {
     pub loop_mode: LoopMode,
     pub start_time: std::time::Instant,
     pub sessions: lumin_core::SessionStore,
+    pub tasks: lumin_core::task::InMemoryTaskStore,
 }
 
 #[tokio::main]
@@ -83,7 +84,7 @@ async fn main() {
                 "researcher".into(), config.workspace.dir.clone(),
             );
 
-            match agent.process_message(&message, &mut session).await {
+            match agent.process_message(&message, &mut session, None).await {
                 Ok(result) => {
                     lumin_core::ipc::write_output(&lumin_core::ipc::OutputMessage {
                         status: "success".into(),
@@ -116,6 +117,7 @@ async fn main() {
                 config: config.clone(), loop_mode,
                 start_time: std::time::Instant::now(),
                 sessions: lumin_core::SessionStore::new(),
+                tasks: lumin_core::task::InMemoryTaskStore::new(),
             });
 
             let app = Router::new()
@@ -123,6 +125,8 @@ async fn main() {
                 .route("/", get(http::health))
                 .route("/v1/chat", post(http::chat))
                 .route("/v1/artifacts", post(http::artifacts))
+                .route("/v1/tasks", get(http::list_tasks))
+                .route("/v1/tasks/{id}", get(http::get_task))
                 .route("/v1/stream", get(ws::ws_handler))
                 .with_state(state);
 

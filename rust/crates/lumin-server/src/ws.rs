@@ -110,7 +110,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
         });
 
         // Run agent and collect events
-        let result = agent.process_message(content, &mut session).await;
+        let result = agent.process_message(content, &mut session, None).await;
 
         // Drain bus events and forward to WebSocket
         while let Ok(event) = rx.try_recv() {

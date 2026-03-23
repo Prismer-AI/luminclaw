@@ -6,6 +6,7 @@ use axum::{
     response::Json,
 };
 use lumin_core::provider::{OpenAIProvider, FallbackProvider, Provider};
+use lumin_core::task::TaskStore;
 use lumin_core::{PrismerAgent, AgentOptions, ToolRegistry, PromptBuilder, MemoryStore, Tool};
 use lumin_core::tools::create_bash_tool;
 use lumin_core::sse::EventBus;
@@ -73,6 +74,9 @@ pub struct ChatResponse {
     pub error: Option<String>,
     pub session_id: String,
     pub runtime: String,
+    pub loop_mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub iterations: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -112,6 +116,8 @@ pub async fn chat(
             error: Some("No API key configured".into()),
             session_id,
             runtime: "lumin".into(),
+            loop_mode: state.loop_mode.to_string(),
+            task_id: None,
             iterations: None,
             tools_used: None,
             duration_ms: Some(start.elapsed().as_millis() as u64),
@@ -142,7 +148,7 @@ pub async fn chat(
                 Arc::new(provider), Arc::new(tools), bus, system_prompt,
                 config.llm.model.clone(), "dual-loop".into(), config.workspace.dir.clone(),
             );
-            let _ = agent.process_message(&content, &mut session).await;
+            let _ = agent.process_message(&content, &mut session, None).await;
         });
 
         return Json(ChatResponse {
@@ -152,6 +158,8 @@ pub async fn chat(
             error: None,
             session_id,
             runtime: "lumin".into(),
+            loop_mode: "dual".into(),
+            task_id: Some(task_id),
             iterations: Some(0),
             tools_used: Some(vec![]),
             duration_ms: Some(start.elapsed().as_millis() as u64),
@@ -254,7 +262,7 @@ pub async fn chat(
         ..AgentOptions::default()
     });
 
-    match agent.process_message(&payload.content, &mut session).await {
+    match agent.process_message(&payload.content, &mut session, None).await {
         Ok(result) => {
             // Persist session for multi-turn
             state.sessions.update(session);
@@ -269,6 +277,8 @@ pub async fn chat(
                 error: None,
                 session_id,
                 runtime: "lumin".into(),
+                loop_mode: state.loop_mode.to_string(),
+                task_id: None,
                 iterations: Some(result.iterations),
                 tools_used: Some(result.tools_used),
                 duration_ms: Some(duration_ms),
@@ -287,6 +297,8 @@ pub async fn chat(
                 error: Some(e),
                 session_id,
                 runtime: "lumin".into(),
+                loop_mode: state.loop_mode.to_string(),
+                task_id: None,
                 iterations: None,
                 tools_used: None,
                 duration_ms: Some(start.elapsed().as_millis() as u64),
@@ -327,4 +339,23 @@ pub async fn artifacts(
         r#type: artifact_type,
         mime_type: payload.mime_type,
     })
+}
+
+// ── Task Polling ──────────────────────────────────────────
+
+pub async fn list_tasks(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let tasks = state.tasks.list();
+    Json(serde_json::json!({ "tasks": tasks, "count": tasks.len() }))
+}
+
+pub async fn get_task(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    match state.tasks.get(&id) {
+        Some(task) => Json(serde_json::json!(task)),
+        None => Json(serde_json::json!({ "error": format!("Task {} not found", id) })),
+    }
 }

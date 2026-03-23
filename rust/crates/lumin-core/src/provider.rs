@@ -54,6 +54,8 @@ pub struct ChatRequest {
     pub model: Option<String>,
     pub max_tokens: Option<u32>,
     pub stream: bool,
+    pub temperature: Option<f32>,
+    pub thinking_level: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -121,6 +123,10 @@ impl OpenAIProvider {
         if let Some(tools) = &request.tools {
             body["tools"] = serde_json::json!(tools);
         }
+        if let Some(temp) = request.temperature {
+            body["temperature"] = serde_json::json!(temp);
+        }
+        Self::apply_thinking_params(&mut body, model, request.thinking_level.as_deref());
 
         let res = self.client
             .post(format!("{}/chat/completions", self.base_url))
@@ -153,6 +159,10 @@ impl OpenAIProvider {
         if let Some(tools) = &request.tools {
             body["tools"] = serde_json::json!(tools);
         }
+        if let Some(temp) = request.temperature {
+            body["temperature"] = serde_json::json!(temp);
+        }
+        Self::apply_thinking_params(&mut body, model, request.thinking_level.as_deref());
 
         let res = self.client
             .post(format!("{}/chat/completions", self.base_url))
@@ -331,6 +341,32 @@ impl Provider for OpenAIProvider {
     fn name(&self) -> &str { "openai-compatible" }
 }
 
+impl OpenAIProvider {
+    /// Apply thinking/reasoning parameters based on model name and level.
+    fn apply_thinking_params(body: &mut serde_json::Value, model: &str, level: Option<&str>) {
+        let level = match level {
+            Some(l) if l != "off" => l,
+            _ => return,
+        };
+
+        let budget = match level {
+            "low" => 4096,
+            "high" => 32768,
+            _ => 8192,
+        };
+
+        if model.contains("kimi") || model.contains("k2") {
+            body["enable_thinking"] = serde_json::json!(true);
+        } else if model.contains("claude") {
+            body["thinking"] = serde_json::json!({
+                "type": "enabled",
+                "budget_tokens": budget,
+            });
+        }
+        // For other models, thinking is controlled via temperature (lower = more thinking)
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -442,6 +478,8 @@ mod tests {
             model: Some("gpt-4o".into()),
             max_tokens: Some(1024),
             stream: false,
+            temperature: Some(0.7),
+            thinking_level: Some("high".into()),
         };
         let cloned = req.clone();
         assert_eq!(cloned.messages.len(), 1);
