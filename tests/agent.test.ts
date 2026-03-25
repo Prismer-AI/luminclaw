@@ -308,4 +308,201 @@ describe('PrismerAgent', () => {
       expect(result.usage!.completionTokens).toBe(130);
     });
   });
+
+  // ── Agent Loop UX events ──
+
+  describe('iteration.start event', () => {
+    it('emits iteration.start at the beginning of each loop iteration', async () => {
+      const provider = createMockProvider([
+        {
+          text: '',
+          toolCalls: [{ id: 'tc-1', name: 'echo', arguments: { text: 'a' } }],
+        },
+        { text: 'Done.', toolCalls: undefined },
+      ]);
+
+      const bus = new EventBus();
+      const events: import('../src/sse.js').AgentEvent[] = [];
+      bus.subscribe((e) => { if (e.type === 'iteration.start') events.push(e); });
+
+      const agents = new AgentRegistry();
+      agents.registerMany(BUILTIN_AGENTS);
+      const agent = new PrismerAgent({
+        provider,
+        tools: createTools(),
+        observer: new ConsoleObserver(),
+        agents,
+        bus,
+        systemPrompt: 'Test',
+        model: 'test',
+        maxIterations: 10,
+        agentId: 'researcher',
+        workspaceDir: '/tmp',
+      });
+
+      const session = new Session('test-iter');
+      await agent.processMessage('test iterations', session);
+
+      expect(events).toHaveLength(2); // 2 iterations
+      expect((events[0].data as any).iteration).toBe(1);
+      expect((events[0].data as any).maxIterations).toBe(10);
+      expect((events[1].data as any).iteration).toBe(2);
+    });
+  });
+
+  describe('thinking.delta event', () => {
+    it('emits thinking.delta when streaming provider returns reasoning content', async () => {
+      // Create a provider with chatStream that simulates thinking
+      const mockStreamProvider: Provider = {
+        name: () => 'mock-stream',
+        chat: async () => ({ text: 'ok' }),
+        chatStream: async (_req, _onDelta, onThinkingDelta) => {
+          // Simulate thinking delta
+          onThinkingDelta?.('I need to think...');
+          onThinkingDelta?.(' about this carefully.');
+          return { text: 'result', thinking: 'I need to think... about this carefully.' };
+        },
+      };
+
+      const bus = new EventBus();
+      const thinkingEvents: import('../src/sse.js').AgentEvent[] = [];
+      bus.subscribe((e) => { if (e.type === 'thinking.delta') thinkingEvents.push(e); });
+
+      const agents = new AgentRegistry();
+      agents.registerMany(BUILTIN_AGENTS);
+      const agent = new PrismerAgent({
+        provider: mockStreamProvider,
+        tools: createTools(),
+        observer: new ConsoleObserver(),
+        agents,
+        bus,
+        systemPrompt: 'Test',
+        model: 'test',
+        maxIterations: 10,
+        agentId: 'researcher',
+        workspaceDir: '/tmp',
+      });
+
+      const session = new Session('test-thinking');
+      await agent.processMessage('think about this', session);
+
+      expect(thinkingEvents).toHaveLength(2);
+      expect((thinkingEvents[0].data as any).delta).toBe('I need to think...');
+      expect((thinkingEvents[1].data as any).delta).toBe(' about this carefully.');
+    });
+  });
+
+  describe('tool.progress event', () => {
+    it('forwards tool progress events from emit handler', async () => {
+      const tools = new ToolRegistry();
+      tools.register({
+        name: 'slow_tool',
+        description: 'A tool that reports progress',
+        parameters: { type: 'object', properties: {} },
+        execute: async (_args: Record<string, unknown>, ctx: ToolContext) => {
+          ctx.emit({ type: 'progress', data: { percent: 50, message: 'Halfway done' } });
+          return 'completed';
+        },
+      });
+
+      const provider = createMockProvider([
+        {
+          text: '',
+          toolCalls: [{ id: 'tc-1', name: 'slow_tool', arguments: {} }],
+        },
+        { text: 'Done.', toolCalls: undefined },
+      ]);
+
+      const bus = new EventBus();
+      const progressEvents: import('../src/sse.js').AgentEvent[] = [];
+      bus.subscribe((e) => { if (e.type === 'tool.progress') progressEvents.push(e); });
+
+      const agents = new AgentRegistry();
+      agents.registerMany(BUILTIN_AGENTS);
+      const agent = new PrismerAgent({
+        provider,
+        tools,
+        observer: new ConsoleObserver(),
+        agents,
+        bus,
+        systemPrompt: 'Test',
+        model: 'test',
+        maxIterations: 10,
+        agentId: 'researcher',
+        workspaceDir: '/tmp',
+      });
+
+      const session = new Session('test-progress');
+      await agent.processMessage('run slow tool', session);
+
+      expect(progressEvents).toHaveLength(1);
+      expect((progressEvents[0].data as any).tool).toBe('slow_tool');
+      expect((progressEvents[0].data as any).percent).toBe(50);
+      expect((progressEvents[0].data as any).message).toBe('Halfway done');
+    });
+  });
+
+  describe('memory.accessed event', () => {
+    it('forwards output events as memory.accessed when action is store/recall', async () => {
+      const tools = new ToolRegistry();
+      tools.register({
+        name: 'memory_store',
+        description: 'Store memory',
+        parameters: { type: 'object', properties: { content: { type: 'string' } }, required: ['content'] },
+        execute: async (_args: Record<string, unknown>, ctx: ToolContext) => {
+          ctx.emit({ type: 'output', data: { action: 'store', preview: 'test fact' } });
+          return 'stored';
+        },
+      });
+      tools.register({
+        name: 'memory_recall',
+        description: 'Recall memory',
+        parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+        execute: async (_args: Record<string, unknown>, ctx: ToolContext) => {
+          ctx.emit({ type: 'output', data: { action: 'recall', query: 'backtest', resultCount: 3 } });
+          return 'results';
+        },
+      });
+
+      const provider = createMockProvider([
+        {
+          text: '',
+          toolCalls: [
+            { id: 'tc-1', name: 'memory_store', arguments: { content: 'test fact' } },
+            { id: 'tc-2', name: 'memory_recall', arguments: { query: 'backtest' } },
+          ],
+        },
+        { text: 'Done.', toolCalls: undefined },
+      ]);
+
+      const bus = new EventBus();
+      const memEvents: import('../src/sse.js').AgentEvent[] = [];
+      bus.subscribe((e) => { if (e.type === 'memory.accessed') memEvents.push(e); });
+
+      const agents = new AgentRegistry();
+      agents.registerMany(BUILTIN_AGENTS);
+      const agent = new PrismerAgent({
+        provider,
+        tools,
+        observer: new ConsoleObserver(),
+        agents,
+        bus,
+        systemPrompt: 'Test',
+        model: 'test',
+        maxIterations: 10,
+        agentId: 'researcher',
+        workspaceDir: '/tmp',
+      });
+
+      const session = new Session('test-memory');
+      await agent.processMessage('use memory', session);
+
+      expect(memEvents).toHaveLength(2);
+      expect((memEvents[0].data as any).action).toBe('store');
+      expect((memEvents[0].data as any).preview).toBe('test fact');
+      expect((memEvents[1].data as any).action).toBe('recall');
+      expect((memEvents[1].data as any).query).toBe('backtest');
+      expect((memEvents[1].data as any).resultCount).toBe(3);
+    });
+  });
 });

@@ -87,6 +87,7 @@ const DOOM_LOOP_THRESHOLD = cfg.agent.doomLoopThreshold;
 const MAX_TOOL_RESULT_CHARS = cfg.agent.maxToolResultChars;
 const MAX_CONTEXT_CHARS = cfg.agent.maxContextChars;
 const REPETITION_THRESHOLD = cfg.agent.repetitionThreshold;
+const TOOL_END_SUMMARY_CHARS = cfg.agent.toolEndSummaryChars;
 const APPROVAL_TIMEOUT_MS = cfg.approval.timeoutMs;
 const SENSITIVE_TOOLS = new Set(cfg.approval.sensitiveTools);
 const SENSITIVE_BASH_PATTERNS = cfg.approval.bashPatterns.map(p => new RegExp(p));
@@ -307,6 +308,8 @@ export class PrismerAgent {
     const recentToolSigs: string[] = [];  // For repetition detection
 
     while (iteration++ < this.maxIterations) {
+      // ── Emit iteration start ──
+      this.bus?.publish({ type: 'iteration.start', data: { sessionId: session.id, iteration, maxIterations: this.maxIterations } });
       // ── Cancellation check ──
       if (signal?.aborted) {
         this.bus?.publish({ type: 'agent.end', data: { sessionId: session.id, toolsUsed } });
@@ -358,10 +361,11 @@ export class PrismerAgent {
       let response: ChatResponse;
       try {
         if (this.provider.chatStream && this.bus) {
-          // Streaming mode — emit text deltas
+          // Streaming mode — emit text deltas and thinking deltas
           response = await this.provider.chatStream(
             { messages, tools: toolSpecs.length > 0 ? toolSpecs : undefined, model: this.model, thinkingLevel: this.thinkingLevel },
             (delta) => this.bus!.publish({ type: 'text.delta', data: { sessionId: session.id, delta } }),
+            (delta) => this.bus!.publish({ type: 'thinking.delta', data: { sessionId: session.id, delta } }),
           );
         } else {
           response = await this.provider.chat({
@@ -481,6 +485,26 @@ export class PrismerAgent {
                 session.addPendingDirective(event.data as unknown as Directive);
                 this.bus?.publish({ type: 'directive', data: event.data });
                 this.observer.recordEvent({ type: 'directive_emit', timestamp: Date.now(), data: event.data });
+              } else if (event.type === 'progress') {
+                this.bus?.publish({
+                  type: 'tool.progress',
+                  data: { sessionId: session.id, tool: call.name, toolId: call.id, ...event.data },
+                });
+              } else if (event.type === 'output') {
+                // Memory access events
+                const action = event.data.action as string | undefined;
+                if (action === 'store' || action === 'recall') {
+                  this.bus?.publish({
+                    type: 'memory.accessed',
+                    data: {
+                      sessionId: session.id,
+                      action,
+                      query: event.data.query as string | undefined,
+                      resultCount: event.data.resultCount as number | undefined,
+                      preview: event.data.preview as string | undefined,
+                    },
+                  });
+                }
               }
             },
           };
@@ -495,7 +519,7 @@ export class PrismerAgent {
           });
           this.bus?.publish({
             type: 'tool.end',
-            data: { sessionId: session.id, tool: call.name, toolId: call.id, result: (result.output || result.error || '').slice(0, 500) },
+            data: { sessionId: session.id, tool: call.name, toolId: call.id, result: (result.output || result.error || '').slice(0, TOOL_END_SUMMARY_CHARS) },
           });
 
           // Hook: after_tool

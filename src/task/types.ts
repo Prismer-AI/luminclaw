@@ -41,6 +41,8 @@ export interface Task {
   artifactIds: string[];
   status: TaskStatus;
   checkpoints: Checkpoint[];
+  /** Execution plan steps (set during planning phase). */
+  plan?: string[];
   /** Final result text (set on completion). */
   result?: string;
   /** Error message (set on failure). */

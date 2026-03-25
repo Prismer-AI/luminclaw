@@ -152,6 +152,8 @@ pub struct AgentConfig {
     pub max_context_chars: usize,
     #[serde(default = "default_loop_mode")]
     pub loop_mode: String,
+    #[serde(default = "default_tool_end_summary_chars")]
+    pub tool_end_summary_chars: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,6 +174,7 @@ fn default_request_timeout() -> u64 { 300_000 }
 fn default_max_iterations() -> u32 { 40 }
 fn default_max_context_chars() -> usize { 600_000 }
 fn default_loop_mode() -> String { "single".into() }
+fn default_tool_end_summary_chars() -> usize { 1000 }
 fn default_workspace_dir() -> String { "/workspace".into() }
 fn default_plugin_path() -> String { "/opt/prismer/plugins/prismer-workspace/dist/src/tools.js".into() }
 fn default_approval_timeout() -> u64 { 30_000 }
@@ -211,6 +214,7 @@ impl Default for AgentConfig {
             max_iterations: default_max_iterations(),
             max_context_chars: default_max_context_chars(),
             loop_mode: default_loop_mode(),
+            tool_end_summary_chars: default_tool_end_summary_chars(),
         }
     }
 }

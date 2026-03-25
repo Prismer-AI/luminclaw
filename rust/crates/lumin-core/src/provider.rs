@@ -147,6 +147,7 @@ pub trait Provider: Send + Sync {
         &self,
         request: ChatRequest,
         _on_delta: Box<dyn Fn(&str) + Send>,
+        _on_thinking_delta: Option<Box<dyn Fn(&str) + Send>>,
     ) -> Result<ChatResponse, ProviderError> {
         self.chat(request).await
     }
@@ -417,6 +418,7 @@ impl Provider for OpenAIProvider {
         &self,
         request: ChatRequest,
         _on_delta: Box<dyn Fn(&str) + Send>,
+        _on_thinking_delta: Option<Box<dyn Fn(&str) + Send>>,
     ) -> Result<ChatResponse, ProviderError> {
         // Use internal streaming, the on_delta callback can be wired to
         // text_parts accumulation in a future enhancement.
@@ -1058,7 +1060,8 @@ impl Provider for FallbackProvider {
     async fn chat_stream(
         &self,
         request: ChatRequest,
-        on_delta: Box<dyn Fn(&str) + Send>,
+        _on_delta: Box<dyn Fn(&str) + Send>,
+        _on_thinking_delta: Option<Box<dyn Fn(&str) + Send>>,
     ) -> Result<ChatResponse, ProviderError> {
         // Try each model in sequence for streaming, matching TS FallbackProvider.chatStream
         let mut last_error = None;
@@ -1069,7 +1072,7 @@ impl Provider for FallbackProvider {
         for model in &models {
             let mut req = request.clone();
             req.model = model.clone();
-            match self.base.chat_stream(req, Box::new(|_| {})).await {
+            match self.base.chat_stream(req, Box::new(|_| {}), None).await {
                 Ok(response) => return Ok(response),
                 Err(e) => {
                     if !Self::is_retryable(&e) {

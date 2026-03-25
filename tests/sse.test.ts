@@ -82,6 +82,63 @@ describe('AgentEventSchema', () => {
     const event = { type: 'agent.start', data: { sessionId: 's1' } }; // missing agentId
     expect(() => AgentEventSchema.parse(event)).toThrow();
   });
+
+  // ── New Agent Loop UX events ──
+
+  it('validates thinking.delta event', () => {
+    const event = { type: 'thinking.delta', data: { sessionId: 's1', delta: 'reasoning...' } };
+    expect(AgentEventSchema.parse(event)).toEqual(event);
+  });
+
+  it('validates iteration.start event', () => {
+    const event = { type: 'iteration.start', data: { sessionId: 's1', iteration: 3, maxIterations: 40 } };
+    expect(AgentEventSchema.parse(event)).toEqual(event);
+  });
+
+  it('validates tool.progress event', () => {
+    const event = { type: 'tool.progress', data: { sessionId: 's1', tool: 'bash', toolId: 'c1', percent: 50, message: 'Compiling...' } };
+    expect(AgentEventSchema.parse(event)).toEqual(event);
+  });
+
+  it('validates tool.progress event with minimal fields', () => {
+    const event = { type: 'tool.progress', data: { sessionId: 's1', tool: 'bash' } };
+    expect(AgentEventSchema.parse(event)).toEqual(event);
+  });
+
+  it('validates task.created event', () => {
+    const event = { type: 'task.created', data: { taskId: 't1', sessionId: 's1', instruction: 'do something' } };
+    expect(AgentEventSchema.parse(event)).toEqual(event);
+  });
+
+  it('validates task.planning event', () => {
+    const event = { type: 'task.planning', data: { taskId: 't1', goal: 'build a backtest system' } };
+    expect(AgentEventSchema.parse(event)).toEqual(event);
+  });
+
+  it('validates task.planned event', () => {
+    const event = { type: 'task.planned', data: { taskId: 't1', steps: ['Read files', 'Write code', 'Run tests'] } };
+    expect(AgentEventSchema.parse(event)).toEqual(event);
+  });
+
+  it('validates memory.accessed event (store)', () => {
+    const event = { type: 'memory.accessed', data: { sessionId: 's1', action: 'store', preview: 'some fact' } };
+    expect(AgentEventSchema.parse(event)).toEqual(event);
+  });
+
+  it('validates memory.accessed event (recall)', () => {
+    const event = { type: 'memory.accessed', data: { sessionId: 's1', action: 'recall', query: 'backtest', resultCount: 3 } };
+    expect(AgentEventSchema.parse(event)).toEqual(event);
+  });
+
+  it('validates task.completed with typed fields', () => {
+    const event = { type: 'task.completed', data: { taskId: 't1', sessionId: 's1', result: 'Done', toolsUsed: ['bash'] } };
+    expect(AgentEventSchema.parse(event)).toEqual(event);
+  });
+
+  it('rejects memory.accessed with invalid action', () => {
+    const event = { type: 'memory.accessed', data: { sessionId: 's1', action: 'invalid' } };
+    expect(() => AgentEventSchema.parse(event)).toThrow();
+  });
 });
 
 // ── EventBus ─────────────────────────────────────────────

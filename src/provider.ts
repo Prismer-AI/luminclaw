@@ -114,8 +114,8 @@ export interface ChatResponse {
 export interface Provider {
   /** Non-streaming chat completion. */
   chat(request: ChatRequest): Promise<ChatResponse>;
-  /** Streaming chat completion — calls `onDelta` for each text token. */
-  chatStream?(request: ChatRequest, onDelta: (delta: string) => void): Promise<ChatResponse>;
+  /** Streaming chat completion — calls `onDelta` for each text token, `onThinkingDelta` for reasoning tokens. */
+  chatStream?(request: ChatRequest, onDelta: (delta: string) => void, onThinkingDelta?: (delta: string) => void): Promise<ChatResponse>;
   /** Human-readable provider identifier. */
   name(): string;
 }
@@ -187,7 +187,7 @@ export class OpenAICompatibleProvider implements Provider {
     return this.parseResponse(data);
   }
 
-  async chatStream(request: ChatRequest, onDelta: (delta: string) => void): Promise<ChatResponse> {
+  async chatStream(request: ChatRequest, onDelta: (delta: string) => void, onThinkingDelta?: (delta: string) => void): Promise<ChatResponse> {
     const model = request.model ?? this.config.defaultModel;
 
     const body: Record<string, unknown> = {
@@ -260,8 +260,10 @@ export class OpenAICompatibleProvider implements Provider {
           // Reasoning content (thinking models like kimi-k2.5)
           if (delta.reasoning_content) {
             reasoningText += delta.reasoning_content;
+            onThinkingDelta?.(delta.reasoning_content);
           } else if (delta.reasoning) {
             reasoningText += delta.reasoning;
+            onThinkingDelta?.(delta.reasoning);
           }
 
           // Text content
@@ -433,11 +435,11 @@ export class FallbackProvider implements Provider {
     throw lastError!;
   }
 
-  async chatStream(request: ChatRequest, onDelta: (d: string) => void): Promise<ChatResponse> {
+  async chatStream(request: ChatRequest, onDelta: (d: string) => void, onThinkingDelta?: (d: string) => void): Promise<ChatResponse> {
     let lastError: Error | undefined;
     for (const model of this.models) {
       try {
-        return await this.base.chatStream!({ ...request, model }, onDelta);
+        return await this.base.chatStream!({ ...request, model }, onDelta, onThinkingDelta);
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
         if (!this.isRetryable(lastError)) throw lastError;

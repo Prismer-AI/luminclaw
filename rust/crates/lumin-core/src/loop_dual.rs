@@ -77,6 +77,7 @@ impl AgentLoop for DualLoopAgent {
             session_id: session_id.clone(),
             instruction: input.content.clone(),
             artifact_ids,
+            plan: None,
             status: TaskStatus::Pending,
             checkpoints: vec![],
             result: None,
@@ -100,6 +101,16 @@ impl AgentLoop for DualLoopAgent {
             .as_ref()
             .and_then(|o| o.bus.clone())
             .unwrap_or_else(|| Arc::new(EventBus::default()));
+
+        // Emit task.created event (frontend can use taskId for status polling)
+        bus.publish(AgentEvent {
+            event_type: "task.created".into(),
+            data: serde_json::json!({
+                "taskId": &task_id,
+                "sessionId": &session_id,
+                "instruction": &input.content[..input.content.len().min(500)],
+            }),
+        });
 
         bus.publish(AgentEvent {
             event_type: "agent.start".into(),
@@ -159,6 +170,8 @@ impl AgentLoop for DualLoopAgent {
                             "content": agent_result.text,
                             "thinking": agent_result.thinking,
                             "toolsUsed": agent_result.tools_used,
+                            "directives": agent_result.directives.iter().map(|d| serde_json::json!({"type": d.r#type, "payload": d.payload})).collect::<Vec<_>>(),
+                            "iterations": agent_result.iterations,
                             "sessionId": session_id_clone,
                             "taskId": task_id_clone,
                         }),
@@ -308,7 +321,7 @@ mod tests {
         let agent = DualLoopAgent::new();
         let _task = agent.tasks.create(Task {
             id: "t1".into(), session_id: "s1".into(), instruction: "test".into(),
-            artifact_ids: vec![], status: TaskStatus::Pending, checkpoints: vec![],
+            artifact_ids: vec![], plan: None, status: TaskStatus::Pending, checkpoints: vec![],
             result: None, error: None, created_at: 0, updated_at: 0,
         });
         agent.tasks.update_status("t1", TaskStatus::Executing);
@@ -386,6 +399,7 @@ mod tests {
                 session_id: "s1".into(),
                 instruction: format!("Task {i}"),
                 artifact_ids: vec![],
+                plan: None,
                 status: TaskStatus::Pending,
                 checkpoints: vec![],
                 result: None,
@@ -416,6 +430,7 @@ mod tests {
             session_id: "s1".into(),
             instruction: "test".into(),
             artifact_ids: vec![],
+            plan: None,
             status: TaskStatus::Pending,
             checkpoints: vec![],
             result: None,
@@ -449,6 +464,7 @@ mod tests {
             session_id: "s1".into(),
             instruction: "test".into(),
             artifact_ids: vec![],
+            plan: None,
             status: TaskStatus::Pending,
             checkpoints: vec![],
             result: None,

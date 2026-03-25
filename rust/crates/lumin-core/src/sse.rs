@@ -533,4 +533,87 @@ mod tests {
         assert_eq!(event.event_type, "tool.approval_response");
         assert_eq!(event.data["approved"], true);
     }
+
+    // ── New Agent Loop UX event types ────────────────────────
+
+    #[test]
+    fn event_thinking_delta_type() {
+        let event = AgentEvent {
+            event_type: "thinking.delta".into(),
+            data: serde_json::json!({"sessionId": "s1", "delta": "reasoning..."}),
+        };
+        assert_eq!(event.event_type, "thinking.delta");
+        assert_eq!(event.data["delta"], "reasoning...");
+    }
+
+    #[test]
+    fn event_iteration_start_type() {
+        let event = AgentEvent {
+            event_type: "iteration.start".into(),
+            data: serde_json::json!({"sessionId": "s1", "iteration": 3, "maxIterations": 40}),
+        };
+        assert_eq!(event.event_type, "iteration.start");
+        assert_eq!(event.data["iteration"], 3);
+        assert_eq!(event.data["maxIterations"], 40);
+    }
+
+    #[test]
+    fn event_tool_progress_type() {
+        let event = AgentEvent {
+            event_type: "tool.progress".into(),
+            data: serde_json::json!({"sessionId": "s1", "tool": "bash", "toolId": "c1", "percent": 50, "message": "Compiling..."}),
+        };
+        assert_eq!(event.event_type, "tool.progress");
+        assert_eq!(event.data["percent"], 50);
+    }
+
+    #[test]
+    fn event_task_created_type() {
+        let event = AgentEvent {
+            event_type: "task.created".into(),
+            data: serde_json::json!({"taskId": "t1", "sessionId": "s1", "instruction": "do something"}),
+        };
+        assert_eq!(event.event_type, "task.created");
+        assert_eq!(event.data["taskId"], "t1");
+    }
+
+    #[test]
+    fn event_task_planning_type() {
+        let event = AgentEvent {
+            event_type: "task.planning".into(),
+            data: serde_json::json!({"taskId": "t1", "goal": "build a backtest system"}),
+        };
+        assert_eq!(event.event_type, "task.planning");
+    }
+
+    #[test]
+    fn event_task_planned_type() {
+        let event = AgentEvent {
+            event_type: "task.planned".into(),
+            data: serde_json::json!({"taskId": "t1", "steps": ["Step 1", "Step 2"]}),
+        };
+        assert_eq!(event.event_type, "task.planned");
+        assert_eq!(event.data["steps"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn event_memory_accessed_store_type() {
+        let event = AgentEvent {
+            event_type: "memory.accessed".into(),
+            data: serde_json::json!({"sessionId": "s1", "action": "store", "preview": "some fact"}),
+        };
+        assert_eq!(event.event_type, "memory.accessed");
+        assert_eq!(event.data["action"], "store");
+    }
+
+    #[test]
+    fn event_memory_accessed_recall_type() {
+        let event = AgentEvent {
+            event_type: "memory.accessed".into(),
+            data: serde_json::json!({"sessionId": "s1", "action": "recall", "query": "backtest", "resultCount": 3}),
+        };
+        assert_eq!(event.event_type, "memory.accessed");
+        assert_eq!(event.data["action"], "recall");
+        assert_eq!(event.data["resultCount"], 3);
+    }
 }

@@ -31,6 +31,9 @@ import type { Task } from '../task/types.js';
 
 const log = createLogger('loop:dual');
 
+/** Planning timeout — skip planning on slow LLM responses. */
+const PLANNING_TIMEOUT_MS = 5_000;
+
 export class DualLoopAgent implements IAgentLoop {
   readonly mode: LoopMode = 'dual';
 
@@ -38,16 +41,18 @@ export class DualLoopAgent implements IAgentLoop {
   readonly tasks = new InMemoryTaskStore();
   readonly sessions = new SessionStore();
   readonly stateMachine = new TaskStateMachine();
+  directiveRouter: DirectiveRouter;
   readonly viewStack = new AgentViewStack();
   readonly memStore: MemoryStore;
 
   private worldModel: WorldModel | null = null;
   private activeBus: EventBus | null = null;
-  private cancelFlag = false;
+  private abortController: AbortController | null = null;
 
   constructor() {
     const cfg = loadConfig();
     this.memStore = new MemoryStore(cfg.workspace.dir);
+    this.directiveRouter = new DirectiveRouter();
   }
 
   /**
@@ -57,7 +62,7 @@ export class DualLoopAgent implements IAgentLoop {
   async processMessage(input: AgentLoopInput, opts?: AgentLoopCallOpts): Promise<AgentLoopResult> {
     const bus = opts?.bus ?? new EventBus();
     this.activeBus = bus;
-    this.cancelFlag = false;
+    this.abortController = new AbortController();
 
     const sessionId = input.sessionId ?? `dual-${Date.now()}`;
     const session = this.sessions.getOrCreate(sessionId);
@@ -102,14 +107,12 @@ export class DualLoopAgent implements IAgentLoop {
     // Create world model for this task
     this.worldModel = newWorldModel;
 
-    // Transition to executing
-    this.stateMachine.transition(task, 'executing');
-
-    // Emit task.created event
+    // Emit task.created event (frontend can use taskId for status polling)
+    bus.publish({ type: 'task.created' as const, data: { taskId, sessionId, instruction: input.content.slice(0, 500) } });
     bus.publish({ type: 'agent.start' as const, data: { sessionId, agentId: 'dual-loop' } });
 
     // Dispatch inner loop in background (fire-and-forget from caller's perspective)
-    this.runInnerLoop(task, input, session, bus).catch(err => {
+    this.runInnerLoop(task, input, session, bus, this.abortController.signal).catch(err => {
       log.error('inner loop crashed', { taskId, error: err instanceof Error ? err.message : String(err) });
       try { this.stateMachine.fail(task, err instanceof Error ? err.message : String(err)); } catch { /* already terminal */ }
       bus.publish({ type: 'error' as const, data: { message: `Task failed: ${err instanceof Error ? err.message : String(err)}` } });
@@ -131,7 +134,8 @@ export class DualLoopAgent implements IAgentLoop {
     task: Task,
     input: AgentLoopInput,
     session: Session,
-    bus: EventBus,
+    outerBus: EventBus,
+    signal: AbortSignal,
   ): Promise<void> {
     const cfg = loadConfig();
     const inputCfg = input.config ?? {};
@@ -146,11 +150,49 @@ export class DualLoopAgent implements IAgentLoop {
       ? new FallbackProvider(baseProvider, [model, ...fallbacks])
       : baseProvider;
 
+    // ── Planning phase (optional, with timeout) ──
+    this.stateMachine.transition(task, 'planning');
+    outerBus.publish({ type: 'task.planning' as const, data: { taskId: task.id, goal: input.content.slice(0, 500) } });
+
+    let planSteps: string[] = [];
+    try {
+      const planResult = await Promise.race([
+        provider.chat({
+          messages: [
+            { role: 'system', content: 'You are a planning assistant. Create a brief execution plan (3-5 steps) as a JSON array of strings. Return ONLY the JSON array, no other text.' },
+            { role: 'user', content: input.content },
+          ],
+          model,
+        }),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), PLANNING_TIMEOUT_MS)),
+      ]);
+
+      if (planResult && planResult.text) {
+        try {
+          const parsed = JSON.parse(planResult.text.replace(/```json\n?|\n?```/g, '').trim());
+          if (Array.isArray(parsed)) planSteps = parsed.map(String).slice(0, 5);
+        } catch {
+          // LLM returned non-JSON — extract lines as steps
+          planSteps = planResult.text.split('\n').filter(l => l.trim()).slice(0, 5);
+        }
+      }
+    } catch (err) {
+      log.warn('planning failed, skipping to execution', { error: err instanceof Error ? err.message : String(err) });
+    }
+
+    if (planSteps.length > 0) {
+      task.plan = planSteps;
+      outerBus.publish({ type: 'task.planned' as const, data: { taskId: task.id, steps: planSteps } });
+    }
+
+    // Transition to executing
+    this.stateMachine.transition(task, 'executing');
+
     // Emit progress checkpoint
     this.tasks.addCheckpoint(task.id, {
       id: randomUUID(),
       type: 'progress',
-      message: 'Starting execution...',
+      message: planSteps.length > 0 ? `Planning complete: ${planSteps.length} steps identified` : 'Starting execution...',
       requiresUserAction: false,
       emittedAt: Date.now(),
     });
@@ -160,6 +202,9 @@ export class DualLoopAgent implements IAgentLoop {
     if (this.worldModel) {
       const handoff = buildHandoffContext(this.worldModel, 'researcher');
       if (handoff) systemPrompt += `\n\n## Task Context\n${handoff}`;
+    }
+    if (planSteps.length > 0) {
+      systemPrompt += `\n\n## Execution Plan\n${planSteps.map((s, i) => `${i + 1}. ${s}`).join('\n')}`;
     }
 
     // Initialize tools
@@ -191,12 +236,34 @@ export class DualLoopAgent implements IAgentLoop {
     agents.registerMany(BUILTIN_AGENTS);
     const observer = new ConsoleObserver();
 
+    // ── Inner bus with DirectiveRouter ──
+    // Create a separate inner bus. Subscribe and route events through
+    // DirectiveRouter before forwarding to the outer bus.
+    const innerBus = new EventBus();
+    this.directiveRouter = new DirectiveRouter(outerBus);
+
+    innerBus.subscribe((event) => {
+      if (event.type === 'directive') {
+        // Route through DirectiveRouter (realtime/checkpoint/hil-only)
+        this.directiveRouter.route(event.data as any);
+        // Track SWITCH_COMPONENT for ViewStack
+        const directiveType = (event.data as any).type;
+        if (directiveType === 'SWITCH_COMPONENT') {
+          const component = (event.data as any).payload?.component ?? '';
+          this.viewStack.recordSwitch('researcher', component);
+        }
+      } else {
+        // Non-directive events forward directly to outer bus
+        outerBus.publish(event);
+      }
+    });
+
     const agent = new PrismerAgent({
       provider,
       tools,
       observer,
       agents,
-      bus,
+      bus: innerBus,
       systemPrompt,
       model,
       maxIterations: (inputCfg.maxIterations as number) ?? cfg.agent.maxIterations,
@@ -205,7 +272,13 @@ export class DualLoopAgent implements IAgentLoop {
     });
 
     try {
-      const result = await agent.processMessage(input.content, session, undefined, input.images);
+      const result = await agent.processMessage(input.content, session, undefined, input.images, signal);
+
+      // Drain checkpoint buffer on completion
+      const buffered = this.directiveRouter.drainCheckpointBuffer();
+      for (const d of buffered) {
+        outerBus.publish({ type: 'directive', data: d as unknown as Record<string, unknown> });
+      }
 
       // Record completion in WorldModel
       if (this.worldModel) {
@@ -250,19 +323,23 @@ export class DualLoopAgent implements IAgentLoop {
         emittedAt: Date.now(),
       });
 
-      bus.publish({ type: 'agent.end' as const, data: { sessionId: session.id, toolsUsed: result.toolsUsed } });
+      outerBus.publish({ type: 'task.completed' as const, data: { taskId: task.id, sessionId: session.id, result: result.text.slice(0, 1000), toolsUsed: result.toolsUsed } });
+      outerBus.publish({ type: 'agent.end' as const, data: { sessionId: session.id, toolsUsed: result.toolsUsed } });
 
-      // Emit chat.final so WebSocket/SSE clients receive the completed result
-      bus.publish({ type: 'chat.final' as const, data: {
+      // Emit chat.final with enriched data for state recovery
+      outerBus.publish({ type: 'chat.final' as const, data: {
         content: result.text,
         thinking: result.thinking,
         toolsUsed: result.toolsUsed,
+        directives: result.directives,
+        iterations: result.iterations,
+        usage: result.usage,
         sessionId: session.id,
         taskId: task.id,
       }});
     } catch (err) {
       this.stateMachine.fail(task, err instanceof Error ? err.message : String(err));
-      bus.publish({ type: 'error' as const, data: { message: err instanceof Error ? err.message : String(err) } });
+      outerBus.publish({ type: 'error' as const, data: { message: err instanceof Error ? err.message : String(err) } });
     } finally {
       await observer.flush();
     }
@@ -317,7 +394,11 @@ export class DualLoopAgent implements IAgentLoop {
   }
 
   cancel(): void {
-    this.cancelFlag = true;
+    // Abort the inner loop via AbortSignal
+    if (this.abortController) {
+      this.abortController.abort();
+      this.abortController = null;
+    }
     const active = this.tasks.getActive();
     if (active) {
       try { this.stateMachine.fail(active, 'Cancelled by user'); } catch { /* already terminal */ }

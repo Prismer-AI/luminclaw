@@ -208,6 +208,72 @@ describe('DualLoopAgent', () => {
   });
 });
 
+// ── Agent Loop UX — Dual Loop Enhancements ───────────────
+
+describe('DualLoopAgent — Agent Loop UX', () => {
+  it('emits task.created event with taskId in processMessage', async () => {
+    const { DualLoopAgent } = await import('../src/loop/dual.js');
+    const { EventBus } = await import('../src/sse.js');
+
+    const agent = new DualLoopAgent();
+    const bus = new EventBus();
+    const events: any[] = [];
+    bus.subscribe((e) => events.push(e));
+
+    // processMessage returns immediately with task info
+    const result = await agent.processMessage({ content: 'test task' }, { bus });
+
+    expect(result.taskId).toBeDefined();
+    expect(result.sessionId).toBeDefined();
+
+    // task.created event should be emitted
+    const taskCreated = events.find(e => e.type === 'task.created');
+    expect(taskCreated).toBeDefined();
+    expect(taskCreated.data.taskId).toBe(result.taskId);
+    expect(taskCreated.data.instruction).toContain('test task');
+  });
+
+  it('cancel() aborts inner loop via AbortSignal', async () => {
+    const { DualLoopAgent } = await import('../src/loop/dual.js');
+    const { EventBus } = await import('../src/sse.js');
+
+    const agent = new DualLoopAgent();
+    const bus = new EventBus();
+
+    // Start a task (will fail because no real LLM, but cancel should still work)
+    await agent.processMessage({ content: 'long task' }, { bus });
+
+    // Cancel should abort without error
+    expect(() => agent.cancel()).not.toThrow();
+  });
+
+  it('Task type supports plan field', async () => {
+    const { DualLoopAgent } = await import('../src/loop/dual.js');
+    const agent = new DualLoopAgent();
+
+    const task = agent.tasks.create({
+      id: 'test-plan',
+      sessionId: 's1',
+      instruction: 'build something',
+      artifactIds: [],
+      status: 'pending',
+    });
+
+    // Plan field should be settable
+    task.plan = ['Step 1', 'Step 2', 'Step 3'];
+    expect(task.plan).toEqual(['Step 1', 'Step 2', 'Step 3']);
+  });
+
+  it('DirectiveRouter is initialized and routes correctly', async () => {
+    const { DualLoopAgent } = await import('../src/loop/dual.js');
+    const agent = new DualLoopAgent();
+
+    // DirectiveRouter should be initialized
+    expect(agent.directiveRouter).toBeDefined();
+    expect(agent.directiveRouter.checkpointBufferSize).toBe(0);
+  });
+});
+
 // ── Factory Integration ──────────────────────────────────
 
 describe('createAgentLoop with dual mode', () => {

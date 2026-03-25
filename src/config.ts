@@ -61,6 +61,8 @@ export const LuminConfigSchema = z.object({
     doomLoopThreshold: z.number().default(3),
     /** Identical tool-call signatures before repetition abort. */
     repetitionThreshold: z.number().default(5),
+    /** Maximum chars from tool result sent in tool.end SSE event. Env: `TOOL_END_SUMMARY_CHARS`. */
+    toolEndSummaryChars: z.number().default(1000),
     /** Agent template (`lite` loads fewer tools). Env: `AGENT_TEMPLATE`. */
     template: z.string().default('lite'),
     /**
@@ -189,6 +191,7 @@ function fromEnv(): Record<string, unknown> {
   const agent: Record<string, unknown> = {};
   if (env.MAX_CONTEXT_CHARS) agent.maxContextChars = parseInt(env.MAX_CONTEXT_CHARS, 10);
   if (env.AGENT_TEMPLATE) agent.template = env.AGENT_TEMPLATE;
+  if (env.TOOL_END_SUMMARY_CHARS) agent.toolEndSummaryChars = parseInt(env.TOOL_END_SUMMARY_CHARS, 10);
   if (env.LUMIN_LOOP_MODE === 'single' || env.LUMIN_LOOP_MODE === 'dual') agent.loopMode = env.LUMIN_LOOP_MODE;
   if (Object.keys(agent).length) raw.agent = agent;
 

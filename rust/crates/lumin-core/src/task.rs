@@ -15,6 +15,7 @@ pub struct Task {
     pub session_id: String,
     pub instruction: String,
     pub artifact_ids: Vec<String>,
+    pub plan: Option<Vec<String>>,
     pub status: TaskStatus,
     pub checkpoints: Vec<Checkpoint>,
     pub result: Option<String>,
@@ -170,6 +171,7 @@ mod tests {
             session_id: "s1".into(),
             instruction: "Write a paper".into(),
             artifact_ids: vec!["art-1".into()],
+            plan: None,
             status,
             checkpoints: vec![],
             result: None,
@@ -188,6 +190,7 @@ mod tests {
             session_id: "sess-7".into(),
             instruction: "Analyze dataset".into(),
             artifact_ids: vec!["a1".into(), "a2".into()],
+            plan: None,
             status: TaskStatus::Pending,
             checkpoints: vec![Checkpoint {
                 id: "cp-1".into(),

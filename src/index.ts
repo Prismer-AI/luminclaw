@@ -151,9 +151,11 @@ async function ensureInitialized(enabledModules?: string[]): Promise<{ tools: To
         },
         required: ['content'],
       },
-      async (args) => {
+      async (args, ctx) => {
+        const content = args.content as string;
         const tags = (args.tags as string[] | undefined) ?? [];
-        await sharedMemory!.store(args.content as string, tags);
+        await sharedMemory!.store(content, tags);
+        ctx.emit({ type: 'output', data: { action: 'store', preview: content.slice(0, 100) } });
         return 'Memory stored successfully.';
       },
     ));
@@ -168,8 +170,11 @@ async function ensureInitialized(enabledModules?: string[]): Promise<{ tools: To
         },
         required: ['query'],
       },
-      async (args) => {
-        const result = await sharedMemory!.recall(args.query as string, (args.maxChars as number) ?? 4000);
+      async (args, ctx) => {
+        const query = args.query as string;
+        const result = await sharedMemory!.recall(query, (args.maxChars as number) ?? 4000);
+        const resultCount = result ? result.split('\n\n').filter(Boolean).length : 0;
+        ctx.emit({ type: 'output', data: { action: 'recall', query, resultCount } });
         return result || 'No matching memories found.';
       },
     ));

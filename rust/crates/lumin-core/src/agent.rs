@@ -43,6 +43,8 @@ pub struct AgentOptions {
     pub bash_sensitive_patterns: Vec<String>,
     /// Timeout in milliseconds before auto-rejecting an approval request.
     pub approval_timeout_ms: u64,
+    /// Maximum chars to include in tool.end event result preview.
+    pub tool_end_summary_chars: usize,
 }
 
 impl Default for AgentOptions {
@@ -63,6 +65,7 @@ impl Default for AgentOptions {
                 r"\bkill\b".to_string(),
             ],
             approval_timeout_ms: 300_000, // 5 minutes
+            tool_end_summary_chars: 1000,
         }
     }
 }
@@ -426,6 +429,16 @@ impl PrismerAgent {
         for iteration in 1..=self.opts.max_iterations {
             actual_iterations = iteration;
 
+            // ── Emit iteration start ──
+            self.bus.publish(AgentEvent {
+                event_type: "iteration.start".into(),
+                data: serde_json::json!({
+                    "sessionId": session.id,
+                    "iteration": iteration,
+                    "maxIterations": self.opts.max_iterations,
+                }),
+            });
+
             // ── Check cancellation flag ──
             if let Some(ref flag) = cancelled {
                 if *flag.lock().unwrap() {
@@ -589,6 +602,9 @@ impl PrismerAgent {
                 let bus_for_emit = self.bus.clone();
                 let directives_for_emit: Arc<Mutex<Vec<Directive>>> = Arc::new(Mutex::new(Vec::new()));
                 let directives_clone = directives_for_emit.clone();
+                let session_id_for_emit = session.id.clone();
+                let tool_name_for_emit = call.name.clone();
+                let tool_id_for_emit = call.id.clone();
                 let emit_fn = Box::new(move |event: ToolEvent| {
                     if event.event_type == "directive" {
                         let directive = Directive {
@@ -605,6 +621,31 @@ impl PrismerAgent {
                             event_type: "directive".into(),
                             data: event.data,
                         });
+                    } else if event.event_type == "progress" {
+                        bus_for_emit.publish(AgentEvent {
+                            event_type: "tool.progress".into(),
+                            data: serde_json::json!({
+                                "sessionId": session_id_for_emit,
+                                "tool": tool_name_for_emit,
+                                "toolId": tool_id_for_emit,
+                                "percent": event.data.get("percent"),
+                                "message": event.data.get("message"),
+                            }),
+                        });
+                    } else if event.event_type == "output" {
+                        let action = event.data.get("action").and_then(|v| v.as_str()).unwrap_or("");
+                        if action == "store" || action == "recall" {
+                            bus_for_emit.publish(AgentEvent {
+                                event_type: "memory.accessed".into(),
+                                data: serde_json::json!({
+                                    "sessionId": session_id_for_emit,
+                                    "action": action,
+                                    "query": event.data.get("query"),
+                                    "resultCount": event.data.get("resultCount"),
+                                    "preview": event.data.get("preview"),
+                                }),
+                            });
+                        }
                     }
                 });
 
@@ -637,7 +678,7 @@ impl PrismerAgent {
 
                 self.bus.publish(AgentEvent {
                     event_type: "tool.end".into(),
-                    data: serde_json::json!({ "sessionId": session.id, "tool": call.name, "toolId": call.id, "result": &truncated[..truncated.len().min(200)] }),
+                    data: serde_json::json!({ "sessionId": session.id, "tool": call.name, "toolId": call.id, "result": &truncated[..truncated.len().min(self.opts.tool_end_summary_chars)] }),
                 });
 
                 // Hook: after_tool
