@@ -29,12 +29,28 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
 import { EventBus, type AgentEvent } from './sse.js';
-import { runAgent } from './index.js';
 import { ChannelManager } from './channels/manager.js';
 import { loadConfig } from './config.js';
 import { createLogger } from './log.js';
+import { VERSION } from './version.js';
+import { createAgentLoop, resolveLoopMode } from './loop/factory.js';
+import type { IAgentLoop } from './loop/types.js';
+import type { DualLoopAgent } from './loop/dual.js';
 
 const log = createLogger('server');
+
+// ── Shared loop instance (initialized in startServer) ────
+// Using a module-level variable so handlers defined as standalone functions
+// can access it via closure — same pattern as `runAgent` was previously used.
+let sharedLoop: IAgentLoop | null = null;
+
+function getLoop(): IAgentLoop {
+  if (!sharedLoop) {
+    // Fallback: create on demand if startServer hasn't run (e.g. tests).
+    sharedLoop = createAgentLoop();
+  }
+  return sharedLoop;
+}
 
 // ── Types ────────────────────────────────────────────────
 
@@ -144,10 +160,18 @@ function wsPing(socket: import('node:net').Socket): void {
 
 // ── HTTP Request Handlers ────────────────────────────────
 
+const MAX_BODY_BYTES = 10_000_000; // 10 MB
+
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     let data = '';
-    req.on('data', (chunk) => { data += chunk; });
+    req.on('data', (chunk) => {
+      data += chunk;
+      if (data.length > MAX_BODY_BYTES) {
+        req.destroy();
+        reject(new Error(`Body exceeds ${MAX_BODY_BYTES} bytes`));
+      }
+    });
     req.on('end', () => resolve(data));
     req.on('error', reject);
     setTimeout(() => reject(new Error('Body read timeout')), 30_000);
@@ -165,11 +189,26 @@ function json(res: ServerResponse, status: number, data: unknown): void {
 }
 
 async function handleHealth(_req: IncomingMessage, res: ServerResponse): Promise<void> {
-  json(res, 200, {
-    status: 'ok',
-    version: '0.3.0',
+  const cfg = loadConfig();
+  const checks: Record<string, string> = {};
+
+  if (!cfg.llm.apiKey) checks.apiKey = 'missing';
+
+  let pluginOk = false;
+  try {
+    const { existsSync } = await import('node:fs');
+    pluginOk = existsSync(cfg.workspace.pluginPath);
+  } catch { /* */ }
+  if (!pluginOk) checks.plugin = `not found: ${cfg.workspace.pluginPath}`;
+
+  const healthy = Object.keys(checks).length === 0;
+  json(res, healthy ? 200 : 503, {
+    status: healthy ? 'ok' : 'degraded',
+    version: VERSION,
     runtime: 'lumin',
+    loopMode: resolveLoopMode(),
     uptime: process.uptime(),
+    ...(healthy ? {} : { checks }),
   });
 }
 
@@ -179,9 +218,9 @@ async function handleTools(_req: IncomingMessage, res: ServerResponse): Promise<
   const { loadWorkspaceToolsFromPlugin, createTool } = await import('./tools/index.js');
 
   const tools = new ToolRegistry();
-  const pluginPath = process.env.PRISMER_PLUGIN_PATH
-    || '/opt/prismer/plugins/prismer-workspace/dist/src/tools.js';
-  const { tools: workspaceTools } = await loadWorkspaceToolsFromPlugin(pluginPath);
+  const cfg = loadConfig();
+  const enabledModules = cfg.modules.enabled.length > 0 ? cfg.modules.enabled : undefined;
+  const { tools: workspaceTools } = await loadWorkspaceToolsFromPlugin(cfg.workspace.pluginPath, enabledModules);
   tools.registerMany(workspaceTools);
 
   // Include bash
@@ -215,30 +254,78 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
   const events: AgentEvent[] = [];
   bus.subscribe((event) => events.push(event));
 
-  await runAgent(
+  const result = await getLoop().processMessage(
     {
-      type: 'message',
       content: payload.content,
       sessionId: payload.sessionId,
       config: payload.config as Record<string, string | number | string[] | undefined> | undefined,
     },
-    {
-      bus,
-      onResult: (result, sessionId) => {
-        json(res, 200, {
-          status: 'success',
-          response: result.text,
-          thinking: result.thinking,
-          directives: result.directives,
-          toolsUsed: result.toolsUsed,
-          usage: result.usage,
-          sessionId,
-          iterations: result.iterations,
-          events: events.length,
-        });
-      },
-    },
+    { bus },
   );
+
+  json(res, 200, {
+    status: 'success',
+    response: result.text,
+    thinking: result.thinking,
+    directives: result.directives,
+    toolsUsed: result.toolsUsed,
+    usage: result.usage,
+    sessionId: result.sessionId,
+    iterations: result.iterations,
+    taskId: result.taskId,
+    loopMode: getLoop().mode,
+    events: events.length,
+  });
+}
+
+async function handleArtifacts(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  let body: string;
+  try {
+    body = await readBody(req);
+  } catch {
+    json(res, 400, { error: 'Failed to read request body' });
+    return;
+  }
+
+  let payload: { url: string; mimeType: string; type?: string };
+  try {
+    payload = JSON.parse(body);
+    if (!payload.url || !payload.mimeType) throw new Error('url and mimeType are required');
+  } catch (err) {
+    json(res, 400, { error: `Invalid JSON: ${err instanceof Error ? err.message : String(err)}` });
+    return;
+  }
+
+  const loop = getLoop();
+  // Access the artifact store through the loop's addArtifact
+  const { createArtifact } = await import('./artifacts/types.js');
+  const artifact = createArtifact({
+    url: payload.url,
+    mimeType: payload.mimeType,
+    type: (payload.type as 'image' | 'file' | 'url') ?? undefined,
+    addedBy: 'user',
+  });
+  loop.addArtifact(artifact);
+
+  json(res, 200, { artifactId: artifact.id, type: artifact.type, mimeType: artifact.mimeType });
+}
+
+// ── Task Polling Handlers ─────────────────────────────────
+
+async function handleListTasks(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const loop = getLoop();
+  const tasks = loop.getTasks?.() ?? [];
+  json(res, 200, { tasks, count: tasks.length });
+}
+
+async function handleGetTask(req: IncomingMessage, res: ServerResponse, taskId: string): Promise<void> {
+  const loop = getLoop();
+  const task = loop.getTask?.(taskId);
+  if (!task) {
+    json(res, 404, { error: `Task ${taskId} not found` });
+    return;
+  }
+  json(res, 200, task);
 }
 
 // ── WebSocket Handler ────────────────────────────────────
@@ -255,16 +342,24 @@ function handleWebSocket(req: IncomingMessage, socket: import('node:net').Socket
     alive: true,
   };
 
-  // AbortController for cancelling the running agent on disconnect
-  let currentAbort: AbortController | null = null;
-
   let recvBuffer = Buffer.alloc(0);
+  // Active chat abort controller — set when chat.send starts, aborted on chat.cancel or disconnect
+  let activeAbort: AbortController | null = null;
 
-  // Heartbeat
+  // Heartbeat — ping every 30s, but tolerate 2 missed pongs before disconnect.
+  // RawWebSocket (bridge client) sends masked pongs that may be lost in TCP buffers
+  // during heavy agent tool execution (large tool results saturate the write buffer).
+  let missedPongs = 0;
   const heartbeat = setInterval(() => {
     if (!client.alive) {
-      socket.destroy();
-      return;
+      missedPongs++;
+      if (missedPongs >= 3) {
+        // 3 consecutive missed pongs (~90s) — client truly gone
+        socket.destroy();
+        return;
+      }
+    } else {
+      missedPongs = 0;
     }
     client.alive = false;
     wsPing(socket);
@@ -273,16 +368,24 @@ function handleWebSocket(req: IncomingMessage, socket: import('node:net').Socket
   socket.on('data', async (data) => {
     recvBuffer = Buffer.concat([recvBuffer, data]);
 
-    // Handle pong (opcode 0x0A)
+    // Handle pong (opcode 0x0A) — client sends masked pong per RFC 6455
     if (recvBuffer.length >= 2 && (recvBuffer[0] & 0x0f) === 0x0a) {
       client.alive = true;
-      recvBuffer = recvBuffer.subarray(2);
+      // Masked pong: 2 header bytes + optional payload length + 4 mask key bytes + payload
+      const masked = (recvBuffer[1] & 0x80) !== 0;
+      const payloadLen = recvBuffer[1] & 0x7f;
+      const frameLen = 2 + (masked ? 4 : 0) + payloadLen;
+      if (recvBuffer.length >= frameLen) {
+        recvBuffer = recvBuffer.subarray(frameLen);
+      } else {
+        recvBuffer = Buffer.alloc(0);
+      }
       return;
     }
 
-    // Handle close (opcode 0x08)
+    // Handle close (opcode 0x08) — client may send masked close frame
     if (recvBuffer.length >= 2 && (recvBuffer[0] & 0x0f) === 0x08) {
-      // Send close back
+      // Send close back (unmasked, server→client)
       const closeFrame = Buffer.alloc(2);
       closeFrame[0] = 0x88;
       closeFrame[1] = 0;
@@ -295,7 +398,7 @@ function handleWebSocket(req: IncomingMessage, socket: import('node:net').Socket
     if (!decoded) return;
     recvBuffer = recvBuffer.subarray(decoded.consumed);
 
-    let msg: { type: string; content?: string; sessionId?: string; config?: Record<string, unknown> };
+    let msg: { type: string; content?: string; sessionId?: string; config?: Record<string, unknown>; images?: Array<{ url: string; path?: string; mimeType?: string }> };
     try {
       msg = JSON.parse(decoded.text);
     } catch {
@@ -320,6 +423,15 @@ function handleWebSocket(req: IncomingMessage, socket: import('node:net').Socket
       return;
     }
 
+    if (msg.type === 'chat.cancel') {
+      if (activeAbort) {
+        activeAbort.abort();
+        activeAbort = null;
+        wsSend(socket, { type: 'chat.cancelled', sessionId: client.sessionId });
+      }
+      return;
+    }
+
     if (msg.type !== 'chat.send') {
       wsSend(socket, { type: 'error', message: `Unknown type: ${msg.type}` });
       return;
@@ -334,6 +446,10 @@ function handleWebSocket(req: IncomingMessage, socket: import('node:net').Socket
     if (msg.sessionId) {
       client.sessionId = msg.sessionId;
     }
+
+    // Create abort controller for this chat turn
+    const abortController = new AbortController();
+    activeAbort = abortController;
 
     // Create event bus that forwards to WebSocket
     const bus = new EventBus();
@@ -378,55 +494,46 @@ function handleWebSocket(req: IncomingMessage, socket: import('node:net').Socket
       }
     });
 
-    // Create abort controller for this agent run
-    currentAbort = new AbortController();
-
-    // Run agent
-    await runAgent(
+    // Run agent (with cancellation support + optional images for multimodal vision)
+    const result = await getLoop().processMessage(
       {
-        type: 'message',
         content: msg.content,
+        images: msg.images,
         sessionId: client.sessionId,
         config: msg.config as Record<string, string | number | string[] | undefined> | undefined,
       },
-      {
-        bus,
-        abortSignal: currentAbort.signal,
-        onResult: (result, sessionId) => {
-          wsSend(socket, {
-            type: 'chat.final',
-            content: result.text,
-            thinking: result.thinking,
-            directives: result.directives,
-            toolsUsed: result.toolsUsed,
-            usage: result.usage,
-            sessionId,
-            iterations: result.iterations,
-          });
-        },
-      },
+      { bus, signal: abortController.signal },
     );
 
-    currentAbort = null;
+    activeAbort = null;
+    wsSend(socket, {
+      type: 'chat.final',
+      content: result.text,
+      thinking: result.thinking,
+      directives: result.directives,
+      toolsUsed: result.toolsUsed,
+      usage: result.usage,
+      sessionId: result.sessionId,
+      iterations: result.iterations,
+    });
   });
 
   socket.on('close', () => {
     clearInterval(heartbeat);
-    currentAbort?.abort();
-    currentAbort = null;
+    // Abort any active agent run on disconnect
+    if (activeAbort) { activeAbort.abort(); activeAbort = null; }
   });
 
   socket.on('error', () => {
     clearInterval(heartbeat);
-    currentAbort?.abort();
-    currentAbort = null;
+    if (activeAbort) { activeAbort.abort(); activeAbort = null; }
   });
 
   // Welcome message
   wsSend(socket, {
     type: 'connected',
     sessionId: client.sessionId,
-    version: '0.3.0',
+    version: VERSION,
     runtime: 'lumin',
   });
 }
@@ -443,6 +550,12 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   const serverCfg = loadConfig();
   const port = opts.port ?? serverCfg.port;
   const host = opts.host ?? serverCfg.host;
+
+  // Initialise the shared agent loop once per server process.
+  // Single-loop mode: stateless, safe to share across concurrent requests.
+  // Dual-loop mode (Phase 4): DualLoopAgent will manage per-task state internally.
+  sharedLoop = createAgentLoop(serverCfg.agent.loopMode);
+  log.info('agent loop initialised', { mode: sharedLoop.mode });
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
@@ -468,6 +581,13 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         await handleTools(req, res);
       } else if (path === '/v1/chat' && method === 'POST') {
         await handleChat(req, res);
+      } else if (path === '/v1/artifacts' && method === 'POST') {
+        await handleArtifacts(req, res);
+      } else if (path === '/v1/tasks' && method === 'GET') {
+        await handleListTasks(req, res);
+      } else if (path.startsWith('/v1/tasks/') && method === 'GET') {
+        const taskId = path.slice('/v1/tasks/'.length);
+        await handleGetTask(req, res, taskId);
       } else {
         json(res, 404, { error: 'Not found' });
       }
@@ -492,18 +612,15 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   // ── Channel Manager — discover and start messaging channels ──
   const channelManager = new ChannelManager();
   channelManager.setHandler(async (msg) => {
-    return new Promise((resolve) => {
-      const bus = new EventBus();
-      runAgent(
-        { type: 'message', content: msg.text, sessionId: `${msg.chatId}-channel` },
-        {
-          bus,
-          onResult: (result) => resolve(result.text || '(no response)'),
-        },
-      ).catch((err) => {
-        resolve(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    try {
+      const result = await getLoop().processMessage({
+        content: msg.text,
+        sessionId: `${msg.chatId}-channel`,
       });
-    });
+      return result.text || '(no response)';
+    } catch (err) {
+      return `Error: ${err instanceof Error ? err.message : String(err)}`;
+    }
   });
   // Start channels (non-blocking)
   channelManager.startAll().catch((err) => {
@@ -515,6 +632,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   const shutdown = () => {
     log.info('shutting down');
     channelManager.stopAll().catch(() => {});
+    sharedLoop?.shutdown().catch(() => {});
     server.close(() => {
       log.info('goodbye');
       process.exit(0);
@@ -524,13 +642,20 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
 
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
+  process.on('unhandledRejection', (err) => {
+    log.error('unhandled promise rejection', { error: err instanceof Error ? err.message : String(err), stack: err instanceof Error ? err.stack : undefined });
+  });
+  process.on('uncaughtException', (err) => {
+    log.error('uncaught exception, shutting down', { error: err.message, stack: err.stack });
+    shutdown();
+  });
 
   return new Promise((resolve) => {
     server.listen(port, host, () => {
       log.info('gateway started', { host, port, http: `http://${host}:${port}/health`, ws: `ws://${host}:${port}/v1/stream` });
       process.stderr.write(`
 ╔═══════════════════════════════════════════════╗
-║  Lumin v0.3.0 — Agent Gateway                ║
+║  Lumin v${VERSION} — Agent Gateway${' '.repeat(Math.max(0, 20 - VERSION.length))}║
 ╠═══════════════════════════════════════════════╣
 ║                                               ║
 ║  HTTP:  http://${host}:${port}/health${' '.repeat(Math.max(0, 25 - host.length - String(port).length))}║

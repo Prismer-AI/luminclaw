@@ -3,4 +3,7 @@ dist/
 *.env
 *.env.local
 .env.*
-ref/
+rust/target/
+tests/output/
+.DS_Store
+.claude/

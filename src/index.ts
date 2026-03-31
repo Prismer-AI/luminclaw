@@ -18,7 +18,7 @@ import { ConsoleObserver } from './observer.js';
 import { EventBus, StdoutSSEWriter } from './sse.js';
 import { SessionStore } from './session.js';
 import { writeOutput, type InputMessage } from './ipc.js';
-import { loadWorkspaceToolsFromPlugin, createTool, createClawHubTool, type WorkspacePluginConfig } from './tools/index.js';
+import { loadWorkspaceToolsFromPlugin, createTool, createClawHubTool, getBuiltinTools, type WorkspacePluginConfig } from './tools/index.js';
 import { PromptBuilder } from './prompt.js';
 import { SkillLoader } from './skills.js';
 import { MemoryStore } from './memory.js';
@@ -67,8 +67,12 @@ async function ensureInitialized(enabledModules?: string[]): Promise<{ tools: To
     const pluginPath = cfg.workspace.pluginPath;
     const pluginConfig = buildPluginConfig();
 
-    // Auto-select modules based on AGENT_TEMPLATE if not explicitly specified
+    // Module gating: PRISMER_ENABLED_MODULES (from server) > explicit arg > AGENT_TEMPLATE fallback
     let modules = enabledModules;
+    if (!modules && cfg.modules.enabled.length > 0) {
+      modules = cfg.modules.enabled;
+      log.debug('module selection from env', { modules: modules.join(', ') });
+    }
     if (!modules) {
       const template = cfg.agent.template;
       if (template === 'lite') {
@@ -94,6 +98,12 @@ async function ensureInitialized(enabledModules?: string[]): Promise<{ tools: To
     if (generateWorkspaceMd) {
       sharedGenerateWorkspaceMd = generateWorkspaceMd;
     }
+
+    // Built-in tools — plugin tools with the same name take precedence
+    const pluginNames = new Set(workspaceTools.map(t => t.name));
+    const builtins = getBuiltinTools(pluginNames);
+    sharedTools.registerMany(builtins);
+    log.debug('built-in tools registered', { count: builtins.length, skipped: pluginNames.size > 0 ? [...pluginNames].filter(n => ['read_file', 'write_file', 'list_files', 'edit_file', 'grep', 'web_fetch', 'think'].includes(n)) : [] });
 
     // Bash — always available (sandboxed by container isolation)
     const workspaceDir = cfg.workspace.dir;
@@ -141,9 +151,11 @@ async function ensureInitialized(enabledModules?: string[]): Promise<{ tools: To
         },
         required: ['content'],
       },
-      async (args) => {
+      async (args, ctx) => {
+        const content = args.content as string;
         const tags = (args.tags as string[] | undefined) ?? [];
-        await sharedMemory!.store(args.content as string, tags);
+        await sharedMemory!.store(content, tags);
+        ctx.emit({ type: 'output', data: { action: 'store', preview: content.slice(0, 100) } });
         return 'Memory stored successfully.';
       },
     ));
@@ -158,8 +170,11 @@ async function ensureInitialized(enabledModules?: string[]): Promise<{ tools: To
         },
         required: ['query'],
       },
-      async (args) => {
-        const result = await sharedMemory!.recall(args.query as string, (args.maxChars as number) ?? 4000);
+      async (args, ctx) => {
+        const query = args.query as string;
+        const result = await sharedMemory!.recall(query, (args.maxChars as number) ?? 4000);
+        const resultCount = result ? result.split('\n\n').filter(Boolean).length : 0;
+        ctx.emit({ type: 'output', data: { action: 'recall', query, resultCount } });
         return result || 'No matching memories found.';
       },
     ));
@@ -262,8 +277,8 @@ export interface RunAgentOptions {
   bus?: EventBus;
   /** Called when agent finishes (server mode sends result over WS instead of stdout). */
   onResult?: (result: AgentResult, sessionId: string) => void;
-  /** Optional AbortSignal to cancel the agent loop externally. */
-  abortSignal?: AbortSignal;
+  /** AbortSignal for cancellation (chat.cancel). Checked between iterations + tool calls. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -287,8 +302,9 @@ export async function runAgent(input: InputMessage, opts: RunAgentOptions = {}):
   const baseUrl = inputCfg.baseUrl || cfg.llm.baseUrl;
   const apiKey = inputCfg.apiKey || cfg.llm.apiKey;
   const rawModel = inputCfg.model || cfg.llm.model;
-  // Strip provider prefix (e.g. "prismer-gateway/us-kimi-k2.5" → "us-kimi-k2.5")
-  const model = rawModel.includes('/') ? rawModel.split('/').pop()! : rawModel;
+  // Strip only the Prismer gateway prefix (e.g. "prismer-gateway/us-kimi-k2.5" → "us-kimi-k2.5")
+  // Keep other prefixes intact (e.g. "openai/gpt-oss-120b" stays as-is for external gateways)
+  const model = rawModel.startsWith('prismer-gateway/') ? rawModel.slice('prismer-gateway/'.length) : rawModel;
   const workspaceDir = cfg.workspace.dir;
 
   const baseProvider = new OpenAICompatibleProvider({ baseUrl, apiKey, defaultModel: model });
@@ -325,7 +341,7 @@ export async function runAgent(input: InputMessage, opts: RunAgentOptions = {}):
     maxIterations: inputCfg.maxIterations ?? cfg.agent.maxIterations,
     agentId,
     workspaceDir,
-    abortSignal: opts.abortSignal,
+    abortSignal: opts.signal,
   });
 
   try {
@@ -378,15 +394,25 @@ export { ToolRegistry } from './tools.js';
 export { EventBus, StdoutSSEWriter } from './sse.js';
 export { SessionStore } from './session.js';
 export { type InputMessage, type OutputMessage, writeOutput, parseOutput, OUTPUT_START, OUTPUT_END } from './ipc.js';
-export { loadWorkspaceToolsFromPlugin, createTool, createClawHubTool } from './tools/index.js';
+export { loadWorkspaceToolsFromPlugin, createTool, createClawHubTool, BUILTIN_TOOLS, getBuiltinTools } from './tools/index.js';
 export { PromptBuilder, type PromptSection } from './prompt.js';
 export { SkillLoader, type LoadedSkill, type SkillMeta } from './skills.js';
-export { MemoryStore } from './memory.js';
+export { MemoryStore, FileMemoryBackend } from './memory.js';
+export type { MemoryBackend, MemorySearchResult, MemoryCapabilities, MemorySearchOptions } from './memory.js';
 export { HookRegistry, type Hook, type HookType, type HookContext } from './hooks.js';
 export { ChannelManager } from './channels/manager.js';
 export type { ChannelAdapter, IncomingMessage as ChannelMessage } from './channels/types.js';
 export { loadConfig, resetConfig, LuminConfigSchema, type LuminConfig } from './config.js';
 export { createLogger, type Logger, type LogLevel } from './log.js';
+export { VERSION } from './version.js';
+export { createAgentLoop, resolveLoopMode } from './loop/factory.js';
+export type { IAgentLoop, AgentLoopInput, AgentLoopResult, AgentLoopCallOpts, Artifact, ArtifactStore, LoopMode } from './loop/types.js';
+export { InMemoryArtifactStore } from './artifacts/memory.js';
+export { createArtifact, inferArtifactType } from './artifacts/types.js';
+export type { ArtifactInput, ArtifactType } from './artifacts/types.js';
+export { InMemoryTaskStore } from './task/store.js';
+export { TaskStateMachine, InvalidTransitionError } from './task/machine.js';
+export type { Task, TaskStatus, TaskStore, Checkpoint, CheckpointType } from './task/types.js';
 export { microcompact, CLEARED_MARKER } from './microcompact.js';
 export { estimateTokens, estimateMessageTokens } from './tokens.js';
 export { StreamingToolExecutor, type ToolCallInfo, type ToolResult, type TrackedTool, type ToolStatus, type ExecuteFn } from './streaming-executor.js';

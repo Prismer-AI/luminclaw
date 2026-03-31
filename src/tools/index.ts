@@ -1,5 +1,5 @@
 /**
- * Tool index — loader for modular workspace tools + built-in bash
+ * Tool index — built-in tools + loader for modular workspace tools
  */
 
 export {
@@ -14,3 +14,5 @@ export {
 } from './loader.js';
 
 export { createClawHubTool } from './clawhub.js';
+
+export { BUILTIN_TOOLS, getBuiltinTools, safePath } from './builtins.js';

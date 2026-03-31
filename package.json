@@ -1,7 +1,7 @@
 {
   "name": "@prismer/agent-core",
-  "version": "0.3.0",
-  "description": "Lumin — lightweight agent runtime for academic research (4,665 LOC, replaces OpenClaw 892K LOC)",
+  "version": "0.3.1",
+  "description": "Lightweight TypeScript agent runtime. Zero heavy dependencies. OpenAI-compatible.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -9,24 +9,71 @@
     "lumin": "dist/cli.js"
   },
   "exports": {
-    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
-    "./agent": { "types": "./dist/agent.d.ts", "default": "./dist/agent.js" },
-    "./provider": { "types": "./dist/provider.d.ts", "default": "./dist/provider.js" },
-    "./tools": { "types": "./dist/tools.d.ts", "default": "./dist/tools.js" },
-    "./session": { "types": "./dist/session.d.ts", "default": "./dist/session.js" },
-    "./memory": { "types": "./dist/memory.d.ts", "default": "./dist/memory.js" },
-    "./hooks": { "types": "./dist/hooks.d.ts", "default": "./dist/hooks.js" },
-    "./compaction": { "types": "./dist/compaction.d.ts", "default": "./dist/compaction.js" },
-    "./schemas": { "types": "./dist/schemas.d.ts", "default": "./dist/schemas.js" },
-    "./sse": { "types": "./dist/sse.d.ts", "default": "./dist/sse.js" },
-    "./directives": { "types": "./dist/directives.d.ts", "default": "./dist/directives.js" },
-    "./server": { "types": "./dist/server.d.ts", "default": "./dist/server.js" },
-    "./log": { "types": "./dist/log.d.ts", "default": "./dist/log.js" },
-    "./config": { "types": "./dist/config.d.ts", "default": "./dist/config.js" }
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./agent": {
+      "types": "./dist/agent.d.ts",
+      "default": "./dist/agent.js"
+    },
+    "./provider": {
+      "types": "./dist/provider.d.ts",
+      "default": "./dist/provider.js"
+    },
+    "./tools": {
+      "types": "./dist/tools.d.ts",
+      "default": "./dist/tools.js"
+    },
+    "./tools/builtins": {
+      "types": "./dist/tools/builtins.d.ts",
+      "default": "./dist/tools/builtins.js"
+    },
+    "./session": {
+      "types": "./dist/session.d.ts",
+      "default": "./dist/session.js"
+    },
+    "./memory": {
+      "types": "./dist/memory.d.ts",
+      "default": "./dist/memory.js"
+    },
+    "./hooks": {
+      "types": "./dist/hooks.d.ts",
+      "default": "./dist/hooks.js"
+    },
+    "./compaction": {
+      "types": "./dist/compaction.d.ts",
+      "default": "./dist/compaction.js"
+    },
+    "./schemas": {
+      "types": "./dist/schemas.d.ts",
+      "default": "./dist/schemas.js"
+    },
+    "./sse": {
+      "types": "./dist/sse.d.ts",
+      "default": "./dist/sse.js"
+    },
+    "./directives": {
+      "types": "./dist/directives.d.ts",
+      "default": "./dist/directives.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "default": "./dist/server.js"
+    },
+    "./log": {
+      "types": "./dist/log.d.ts",
+      "default": "./dist/log.js"
+    },
+    "./config": {
+      "types": "./dist/config.d.ts",
+      "default": "./dist/config.js"
+    }
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc",
@@ -39,10 +86,11 @@
     "zod": "^3.23.0"
   },
   "devDependencies": {
-    "typescript": "^5.7.0",
+    "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
     "vitest": "^3.0.0",
-    "@types/node": "^22.0.0"
+    "ws": "^8.20.0"
   },
   "engines": {
     "node": ">=20"
@@ -52,6 +100,18 @@
     "url": "https://github.com/prismer/library",
     "directory": "docker/agent"
   },
-  "keywords": ["agent", "llm", "openai", "tool-calling", "academic", "runtime"],
+  "author": "Prismer.AI <dev@prismer.ai> (https://prismer.ai)",
+  "homepage": "https://github.com/prismer-ai/agent-core#readme",
+  "bugs": {
+    "url": "https://github.com/prismer-ai/agent-core/issues"
+  },
+  "keywords": [
+    "agent",
+    "llm",
+    "openai",
+    "tool-calling",
+    "runtime",
+    "ai-agent"
+  ],
   "license": "MIT"
 }

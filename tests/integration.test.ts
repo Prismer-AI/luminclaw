@@ -156,7 +156,8 @@ describe('Session + Directives', () => {
     const session = new Session('test-session');
     session.addMessage({ role: 'assistant', content: 'Previous response' });
 
-    const messages = session.buildMessages('New question', 'System prompt here');
+    session.addMessage({ role: 'user', content: 'New question' });
+    const messages = session.buildMessages('System prompt here');
     expect(messages[0].role).toBe('system');
     expect(messages[0].content).toContain('System prompt here');
     expect(messages[1].role).toBe('assistant');

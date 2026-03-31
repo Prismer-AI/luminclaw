@@ -11,7 +11,8 @@
  * @module session
  */
 
-import type { Message } from './provider.js';
+import type { Message, ContentBlock } from './provider.js';
+import type { ImageRef } from './ipc.js';
 
 // ── Types ────────────────────────────────────────────────
 
@@ -33,7 +34,8 @@ export interface Directive {
  * @example
  * ```typescript
  * const session = new Session('s1');
- * const messages = session.buildMessages('hello', systemPrompt);
+ * session.addMessage({ role: 'user', content: 'hello' });
+ * const messages = session.buildMessages(systemPrompt);
  * ```
  */
 export class Session {
@@ -49,9 +51,10 @@ export class Session {
     this.parentId = parentId;
   }
 
-  /** Build the message array for LLM call */
+  /** Build the message array for LLM call.
+   *  User input should already be in `this.messages` (added by agent before calling this).
+   */
   buildMessages(
-    userInput: string,
     systemPrompt: string,
     memoryContext?: string,
   ): Message[] {
@@ -70,11 +73,8 @@ export class Session {
       msgs.push({ role: 'assistant', content: 'Understood, I have the context from our earlier conversation.' });
     }
 
-    // Previous conversation history
-    msgs.push(...this.messages);
-
-    // Current user input
-    msgs.push({ role: 'user', content: userInput });
+    // Conversation history (includes user messages) — with orphaned tool_call repair
+    msgs.push(...repairOrphanedToolCalls(this.messages));
 
     return msgs;
   }
@@ -88,6 +88,13 @@ export class Session {
   /** Track a directive emitted during this session */
   addPendingDirective(directive: Directive): void {
     this.pendingDirectives.push(directive);
+  }
+
+  /** Remove all messages from the session (for recovery after corruption). */
+  clearHistory(): void {
+    this.messages.length = 0;
+    this.compactionSummary = null;
+    this.lastActivity = Date.now();
   }
 
   /** Create a child session for sub-agent delegation */
@@ -162,4 +169,48 @@ export class SessionStore {
   get size(): number {
     return this.sessions.size;
   }
+}
+
+// ── Session Repair Utilities ──────────────────────────
+
+/**
+ * Repair orphaned tool_calls in message history.
+ *
+ * When a WS connection drops mid-agent-loop, the session may contain an
+ * assistant message with `toolCalls` that has no corresponding tool-result
+ * messages. The LLM API rejects this ("tool_calls must be followed by tool
+ * messages"). This function patches the gap by inserting synthetic tool
+ * results for any unmatched tool_calls.
+ */
+function repairOrphanedToolCalls(messages: Message[]): Message[] {
+  if (messages.length === 0) return messages;
+
+  const result: Message[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    result.push(messages[i]);
+    const msg = messages[i];
+
+    if (msg.role === 'assistant' && msg.toolCalls?.length) {
+      // Collect IDs of tool_calls in this assistant message
+      const expectedIds = new Set(msg.toolCalls.map(tc => tc.id));
+
+      // Check subsequent messages for matching tool results
+      for (let j = i + 1; j < messages.length && messages[j].role === 'tool'; j++) {
+        const toolId = (messages[j] as { toolCallId?: string }).toolCallId;
+        if (toolId) expectedIds.delete(toolId);
+      }
+
+      // Patch any missing tool results
+      for (const orphanedId of expectedIds) {
+        const toolName = msg.toolCalls.find(tc => tc.id === orphanedId)?.function?.name || 'unknown';
+        result.push({
+          role: 'tool',
+          content: JSON.stringify({ error: 'Tool execution interrupted (connection lost)' }),
+          toolCallId: orphanedId,
+        } as Message & { toolCallId: string });
+      }
+    }
+  }
+
+  return result;
 }

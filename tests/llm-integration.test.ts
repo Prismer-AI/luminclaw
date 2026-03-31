@@ -12,7 +12,7 @@ import { execSync } from 'node:child_process';
 
 const TEST_DIR = join(process.cwd(), '.test-workspace-llm');
 const BASE_URL = process.env.OPENAI_API_BASE_URL || 'http://34.60.178.0:3000/v1';
-const API_KEY = process.env.OPENAI_API_KEY || 'sk-JNQdVfQyeTmPqdrKl0oDe2lcocVgWzt9IhBjHtGaP13fFBUX';
+const API_KEY = process.env.OPENAI_API_KEY || '';
 const MODEL = process.env.AGENT_DEFAULT_MODEL || 'us-kimi-k2.5';
 
 const CLI = join(process.cwd(), 'dist', 'cli.js');

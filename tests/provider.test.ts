@@ -122,6 +122,21 @@ describe('FallbackProvider', () => {
   });
 
   describe('chatStream', () => {
+    it('passes onThinkingDelta through to base provider', async () => {
+      const base = createMockProvider();
+      const thinkingDeltas: string[] = [];
+      vi.spyOn(base, 'chatStream').mockImplementation(
+        async (_req, _onDelta, onThinkingDelta) => {
+          onThinkingDelta?.('thinking...');
+          return mockSuccess('ok');
+        },
+      );
+
+      const fb = new FallbackProvider(base, ['model-a']);
+      await fb.chatStream(dummyRequest, () => {}, (d) => thinkingDeltas.push(d));
+      expect(thinkingDeltas).toEqual(['thinking...']);
+    });
+
     it('falls back on stream failure', async () => {
       const base = createMockProvider();
       vi.spyOn(base, 'chatStream')
@@ -138,7 +153,8 @@ describe('FallbackProvider', () => {
         2,
         expect.objectContaining({ model: 'model-b' }),
         expect.any(Function),
-        undefined,
+        undefined, // onThinkingDelta (optional)
+        undefined, // onToolUse (optional)
       );
     });
   });

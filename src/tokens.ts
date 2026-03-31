@@ -23,12 +23,22 @@ export function estimateTokens(text: string): number {
 }
 
 /** Estimate total tokens for a conversation message array. */
-export function estimateMessageTokens(messages: Array<{ role: string; content?: string | null }>): number {
+export function estimateMessageTokens(messages: Array<{ role: string; content?: string | unknown[] | null }>): number {
   let total = 0;
   for (const msg of messages) {
     total += 4; // role + delimiters overhead
     if (msg.content) {
-      total += estimateTokens(msg.content);
+      if (typeof msg.content === 'string') {
+        total += estimateTokens(msg.content);
+      } else if (Array.isArray(msg.content)) {
+        for (const block of msg.content) {
+          if (typeof block === 'object' && block && 'text' in block) {
+            total += estimateTokens((block as { text: string }).text);
+          } else {
+            total += 200; // image/other blocks
+          }
+        }
+      }
     }
   }
   return total;

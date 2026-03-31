@@ -84,6 +84,66 @@ export const AgentEventSchema = z.discriminatedUnion('type', [
       reason: z.string().optional(),
     }),
   }),
+  z.object({
+    type: z.literal('chat.cancelled'),
+    data: z.object({
+      sessionId: z.string(),
+    }),
+  }),
+  z.object({
+    type: z.literal('chat.final'),
+    data: z.record(z.unknown()),
+  }),
+  z.object({
+    type: z.literal('task.completed'),
+    data: z.object({
+      taskId: z.string(),
+      sessionId: z.string(),
+      result: z.string().optional(),
+      toolsUsed: z.array(z.string()).optional(),
+    }),
+  }),
+  // ── New events (Agent Loop UX) ──
+  z.object({
+    type: z.literal('thinking.delta'),
+    data: z.object({ sessionId: z.string(), delta: z.string() }),
+  }),
+  z.object({
+    type: z.literal('iteration.start'),
+    data: z.object({ sessionId: z.string(), iteration: z.number(), maxIterations: z.number() }),
+  }),
+  z.object({
+    type: z.literal('tool.progress'),
+    data: z.object({
+      sessionId: z.string(),
+      tool: z.string(),
+      toolId: z.string().optional(),
+      percent: z.number().optional(),
+      message: z.string().optional(),
+    }),
+  }),
+  z.object({
+    type: z.literal('task.created'),
+    data: z.object({ taskId: z.string(), sessionId: z.string(), instruction: z.string() }),
+  }),
+  z.object({
+    type: z.literal('task.planning'),
+    data: z.object({ taskId: z.string(), goal: z.string() }),
+  }),
+  z.object({
+    type: z.literal('task.planned'),
+    data: z.object({ taskId: z.string(), steps: z.array(z.string()) }),
+  }),
+  z.object({
+    type: z.literal('memory.accessed'),
+    data: z.object({
+      sessionId: z.string(),
+      action: z.enum(['store', 'recall']),
+      query: z.string().optional(),
+      resultCount: z.number().optional(),
+      preview: z.string().optional(),
+    }),
+  }),
 ]);
 
 /** A single agent event (inferred from {@link AgentEventSchema}). */

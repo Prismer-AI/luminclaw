@@ -85,6 +85,7 @@ describe('OpenAICompatibleProvider.chatStream onToolUse', () => {
     const response = await provider.chatStream(
       { messages: [{ role: 'user', content: 'test' }] },
       onDelta,
+      undefined, // onThinkingDelta
       onToolUse,
     );
 
@@ -130,6 +131,7 @@ describe('OpenAICompatibleProvider.chatStream onToolUse', () => {
     await provider.chatStream(
       { messages: [{ role: 'user', content: 'test' }] },
       onDelta,
+      undefined, // onThinkingDelta
       onToolUse,
     );
 
@@ -193,6 +195,7 @@ describe('OpenAICompatibleProvider.chatStream onToolUse', () => {
     const response = await provider.chatStream(
       { messages: [{ role: 'user', content: 'test' }] },
       onDelta,
+      undefined, // onThinkingDelta
       onToolUse,
     );
 
@@ -228,6 +231,7 @@ describe('OpenAICompatibleProvider.chatStream onToolUse', () => {
     await provider.chatStream(
       { messages: [{ role: 'user', content: 'test' }] },
       vi.fn(),
+      undefined, // onThinkingDelta
       onToolUse,
     );
 

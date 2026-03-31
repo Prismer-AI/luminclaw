@@ -12,7 +12,7 @@
  *
  * // Load from environment (zero-arg is the common case)
  * const cfg = loadConfig();
- * console.log(cfg.llm.model);       // 'us-kimi-k2.5'
+ * console.log(cfg.llm.model);       // 'gpt-4o'
  * console.log(cfg.agent.maxIterations); // 40
  *
  * // Override specific values
@@ -36,11 +36,11 @@ export const LuminConfigSchema = z.object({
   /** LLM provider settings. */
   llm: z.object({
     /** OpenAI-compatible API base URL. Env: `OPENAI_API_BASE_URL`. */
-    baseUrl: z.string().default('http://localhost:3000/v1'),
+    baseUrl: z.string().default('https://api.openai.com/v1'),
     /** API key for the LLM provider. Env: `OPENAI_API_KEY`. */
     apiKey: z.string().default(''),
     /** Default model identifier. Env: `AGENT_DEFAULT_MODEL`. */
-    model: z.string().default('us-kimi-k2.5'),
+    model: z.string().default('gpt-4o'),
     /** Fallback model chain (tried in order). Env: `MODEL_FALLBACK_CHAIN` (comma-separated). */
     fallbackModels: z.array(z.string()).default([]),
     /** Default max completion tokens. */
@@ -61,8 +61,19 @@ export const LuminConfigSchema = z.object({
     doomLoopThreshold: z.number().default(3),
     /** Identical tool-call signatures before repetition abort. */
     repetitionThreshold: z.number().default(5),
+    /** Maximum chars from tool result sent in tool.end SSE event. Env: `TOOL_END_SUMMARY_CHARS`. */
+    toolEndSummaryChars: z.number().default(1000),
     /** Agent template (`lite` loads fewer tools). Env: `AGENT_TEMPLATE`. */
     template: z.string().default('lite'),
+    /**
+     * Execution architecture. Env: `LUMIN_LOOP_MODE`.
+     * - `single`: synchronous single-loop (default, production-stable)
+     * - `dual`:   async dual-loop / HIL+EL (experimental, Phase 4)
+     *
+     * Per-container DB field overrides this value at request time via
+     * `resolveLoopMode()`. This config value is the server-wide default.
+     */
+    loopMode: z.enum(['single', 'dual']).default('single'),
   }).default({}),
 
   /** Approval gate for sensitive tools. */
@@ -79,10 +90,10 @@ export const LuminConfigSchema = z.object({
 
   /** Workspace filesystem settings. */
   workspace: z.object({
-    /** Root working directory inside the container. Env: `WORKSPACE_DIR`. */
-    dir: z.string().default('/workspace'),
-    /** Path to the prismer-workspace plugin entry. Env: `PRISMER_PLUGIN_PATH`. */
-    pluginPath: z.string().default('/opt/prismer/plugins/prismer-workspace/dist/src/tools.js'),
+    /** Root working directory. Env: `WORKSPACE_DIR`. */
+    dir: z.string().default('./workspace'),
+    /** Path to the workspace plugin entry. Env: `PRISMER_PLUGIN_PATH`. */
+    pluginPath: z.string().default(''),
   }).default({}),
 
   /** Session management. */
@@ -117,6 +128,20 @@ export const LuminConfigSchema = z.object({
     level: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
     /** Debug namespace filter (e.g., `lumin:*`). Env: `DEBUG`. */
     debug: z.string().default(''),
+  }).default({}),
+
+  /** Memory backend settings. */
+  memory: z.object({
+    /** Backend type. Env: `MEMORY_BACKEND`. */
+    backend: z.enum(['file', 'cloud', 'vector']).default('file'),
+    /** Max chars for recent context in system prompt. */
+    recentContextMaxChars: z.number().default(3000),
+  }).default({}),
+
+  /** Tool module gating. */
+  modules: z.object({
+    /** Enabled tool module names. Env: `PRISMER_ENABLED_MODULES` (comma-separated). Empty = load all. */
+    enabled: z.array(z.string()).default([]),
   }).default({}),
 
   /** Prismer platform integration. */
@@ -157,7 +182,7 @@ function fromEnv(): Record<string, unknown> {
   if (env.OPENAI_API_KEY) llm.apiKey = env.OPENAI_API_KEY;
   if (env.AGENT_DEFAULT_MODEL) {
     const m = env.AGENT_DEFAULT_MODEL;
-    llm.model = m.includes('/') ? m.split('/').pop()! : m;
+    llm.model = m.startsWith('prismer-gateway/') ? m.slice('prismer-gateway/'.length) : m;
   }
   if (env.MODEL_FALLBACK_CHAIN) llm.fallbackModels = env.MODEL_FALLBACK_CHAIN.split(',').filter(Boolean);
   if (Object.keys(llm).length) raw.llm = llm;
@@ -166,6 +191,8 @@ function fromEnv(): Record<string, unknown> {
   const agent: Record<string, unknown> = {};
   if (env.MAX_CONTEXT_CHARS) agent.maxContextChars = parseInt(env.MAX_CONTEXT_CHARS, 10);
   if (env.AGENT_TEMPLATE) agent.template = env.AGENT_TEMPLATE;
+  if (env.TOOL_END_SUMMARY_CHARS) agent.toolEndSummaryChars = parseInt(env.TOOL_END_SUMMARY_CHARS, 10);
+  if (env.LUMIN_LOOP_MODE === 'single' || env.LUMIN_LOOP_MODE === 'dual') agent.loopMode = env.LUMIN_LOOP_MODE;
   if (Object.keys(agent).length) raw.agent = agent;
 
   // Approval
@@ -185,6 +212,16 @@ function fromEnv(): Record<string, unknown> {
   if (env.LOG_LEVEL) log.level = env.LOG_LEVEL.toLowerCase();
   if (env.DEBUG) log.debug = env.DEBUG;
   if (Object.keys(log).length) raw.log = log;
+
+  // Memory
+  const memory: Record<string, unknown> = {};
+  if (env.MEMORY_BACKEND) memory.backend = env.MEMORY_BACKEND;
+  if (Object.keys(memory).length) raw.memory = memory;
+
+  // Modules
+  const modules: Record<string, unknown> = {};
+  if (env.PRISMER_ENABLED_MODULES) modules.enabled = env.PRISMER_ENABLED_MODULES.split(',').filter(Boolean);
+  if (Object.keys(modules).length) raw.modules = modules;
 
   // Prismer
   const prismer: Record<string, unknown> = {};
@@ -245,6 +282,16 @@ export function loadConfig(overrides?: Record<string, unknown>): LuminConfig {
 
   const envValues = fromEnv();
   const merged = overrides ? deepMerge(envValues, overrides) : envValues;
+
+  // Zod v4 fix: `.default({})` on sub-objects sets the raw `{}` without
+  // re-parsing through the inner schema, so inner field defaults don't apply.
+  // Explicitly inserting `{}` for missing sub-objects makes Zod parse them
+  // through z.object({...}) which correctly applies inner field defaults.
+  const SUB_KEYS = ['llm', 'agent', 'approval', 'workspace', 'session', 'server', 'eventBus', 'log', 'prismer'];
+  for (const key of SUB_KEYS) {
+    if (!(key in merged)) merged[key] = {};
+  }
+
   const config = LuminConfigSchema.parse(merged);
 
   if (!overrides) {

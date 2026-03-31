@@ -20,10 +20,31 @@ const log = createLogger('provider');
 
 // ── Schemas ──────────────────────────────────────────────
 
+/**
+ * Content block for multimodal messages (OpenAI-compatible format).
+ * Used when a user message contains both text and images.
+ */
+export const ContentBlockSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('text'), text: z.string() }),
+  z.object({
+    type: z.literal('image_url'),
+    image_url: z.object({
+      url: z.string(),
+      detail: z.enum(['auto', 'low', 'high']).optional(),
+    }),
+  }),
+]);
+
+export type ContentBlock = z.infer<typeof ContentBlockSchema>;
+
 /** Zod schema for a single conversation message (system, user, assistant, or tool). */
 export const MessageSchema = z.object({
   role: z.enum(['system', 'user', 'assistant', 'tool']),
-  content: z.string().nullable(),
+  /** Text content (string) or multimodal content blocks (array) */
+  content: z.union([
+    z.string(),
+    z.array(ContentBlockSchema),
+  ]).nullable(),
   name: z.string().optional(),
   toolCallId: z.string().optional(),
   reasoningContent: z.string().optional(),
@@ -97,8 +118,8 @@ export interface ChatResponse {
 export interface Provider {
   /** Non-streaming chat completion. */
   chat(request: ChatRequest): Promise<ChatResponse>;
-  /** Streaming chat completion — calls `onDelta` for each text token, and optionally `onToolUse` when a tool_use block is fully parsed. */
-  chatStream?(request: ChatRequest, onDelta: (delta: string) => void, onToolUse?: (toolCall: ToolCall) => void): Promise<ChatResponse>;
+  /** Streaming chat completion — calls `onDelta` for each text token, `onThinkingDelta` for reasoning tokens. */
+  chatStream?(request: ChatRequest, onDelta: (delta: string) => void, onThinkingDelta?: (delta: string) => void, onToolUse?: (toolCall: ToolCall) => void): Promise<ChatResponse>;
   /** Human-readable provider identifier. */
   name(): string;
 }
@@ -170,7 +191,7 @@ export class OpenAICompatibleProvider implements Provider {
     return this.parseResponse(data);
   }
 
-  async chatStream(request: ChatRequest, onDelta: (delta: string) => void, onToolUse?: (toolCall: ToolCall) => void): Promise<ChatResponse> {
+  async chatStream(request: ChatRequest, onDelta: (delta: string) => void, onThinkingDelta?: (delta: string) => void, onToolUse?: (toolCall: ToolCall) => void): Promise<ChatResponse> {
     const model = request.model ?? this.config.defaultModel;
 
     const body: Record<string, unknown> = {
@@ -212,10 +233,10 @@ export class OpenAICompatibleProvider implements Provider {
     // Parse SSE stream
     let fullText = '';
     let reasoningText = '';
-    let finishReason: string | undefined;
     const toolCalls: ToolCall[] = [];
     const toolCallBuffers = new Map<number, { id: string; name: string; args: string }>();
     const finalizedIndices = new Set<number>();
+    let finishReason: string | undefined;
     let usage: { promptTokens: number; completionTokens: number } | undefined;
 
     const reader = res.body?.getReader();
@@ -245,6 +266,10 @@ export class OpenAICompatibleProvider implements Provider {
           // Reasoning content (thinking models like kimi-k2.5)
           if (delta.reasoning_content) {
             reasoningText += delta.reasoning_content;
+            onThinkingDelta?.(delta.reasoning_content);
+          } else if (delta.reasoning) {
+            reasoningText += delta.reasoning;
+            onThinkingDelta?.(delta.reasoning);
           }
 
           // Text content
@@ -257,16 +282,13 @@ export class OpenAICompatibleProvider implements Provider {
           if (delta.tool_calls) {
             for (const tc of delta.tool_calls as any[]) {
               const idx = tc.index ?? 0;
-              // When a new index appears with an id, the previous tool calls are complete
+              // Early emission: when a new tool_call index appears, previous ones are complete
               if (tc.id && !toolCallBuffers.has(idx) && onToolUse) {
                 for (const [prevIdx, prevBuf] of toolCallBuffers) {
                   if (!finalizedIndices.has(prevIdx)) {
                     finalizedIndices.add(prevIdx);
-                    try {
-                      onToolUse({ id: prevBuf.id, name: prevBuf.name, arguments: JSON.parse(prevBuf.args || '{}') });
-                    } catch {
-                      onToolUse({ id: prevBuf.id, name: prevBuf.name, arguments: {} });
-                    }
+                    try { onToolUse({ id: prevBuf.id, name: prevBuf.name, arguments: JSON.parse(prevBuf.args || '{}') }); }
+                    catch { onToolUse({ id: prevBuf.id, name: prevBuf.name, arguments: {} }); }
                   }
                 }
               }
@@ -302,11 +324,8 @@ export class OpenAICompatibleProvider implements Provider {
       for (const [idx, buf] of toolCallBuffers) {
         if (!finalizedIndices.has(idx)) {
           finalizedIndices.add(idx);
-          try {
-            onToolUse({ id: buf.id, name: buf.name, arguments: JSON.parse(buf.args || '{}') });
-          } catch {
-            onToolUse({ id: buf.id, name: buf.name, arguments: {} });
-          }
+          try { onToolUse({ id: buf.id, name: buf.name, arguments: JSON.parse(buf.args || '{}') }); }
+          catch { onToolUse({ id: buf.id, name: buf.name, arguments: {} }); }
         }
       }
     }
@@ -319,7 +338,8 @@ export class OpenAICompatibleProvider implements Provider {
           name: buf.name,
           arguments: JSON.parse(buf.args || '{}'),
         });
-      } catch {
+      } catch (err) {
+        log.warn('tool call args parse failed, using empty object', { toolId: buf.id, toolName: buf.name, rawArgs: buf.args.slice(0, 200), error: err instanceof Error ? err.message : String(err) });
         toolCalls.push({ id: buf.id, name: buf.name, arguments: {} });
       }
     }
@@ -360,7 +380,8 @@ export class OpenAICompatibleProvider implements Provider {
     };
     if (msg.name) formatted.name = msg.name;
     if (msg.toolCallId) formatted.tool_call_id = msg.toolCallId;
-    if (msg.reasoningContent) formatted.reasoning_content = msg.reasoningContent;
+    // NOTE: reasoning_content is stored internally but NOT sent back to the API
+    // — many providers reject unknown properties on assistant messages.
     if (msg.toolCalls) formatted.tool_calls = msg.toolCalls;
     return formatted;
   }
@@ -380,7 +401,8 @@ export class OpenAICompatibleProvider implements Provider {
             name: tc.function.name,
             arguments: JSON.parse(tc.function.arguments || '{}'),
           });
-        } catch {
+        } catch (err) {
+          log.warn('tool call args parse failed, using empty object', { toolId: tc.id, toolName: tc.function.name, rawArgs: (tc.function.arguments || '').slice(0, 200), error: err instanceof Error ? err.message : String(err) });
           toolCalls.push({ id: tc.id, name: tc.function.name, arguments: {} });
         }
       }
@@ -391,7 +413,7 @@ export class OpenAICompatibleProvider implements Provider {
     return {
       text: message.content ?? '',
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-      thinking: message.reasoning_content ?? message.thinking ?? undefined,
+      thinking: message.reasoning_content ?? message.reasoning ?? message.thinking ?? undefined,
       finishReason: choice.finish_reason ?? undefined,
       usage: usage ? {
         promptTokens: usage.prompt_tokens ?? 0,
@@ -446,11 +468,11 @@ export class FallbackProvider implements Provider {
     throw lastError!;
   }
 
-  async chatStream(request: ChatRequest, onDelta: (d: string) => void, onToolUse?: (toolCall: ToolCall) => void): Promise<ChatResponse> {
+  async chatStream(request: ChatRequest, onDelta: (d: string) => void, onThinkingDelta?: (d: string) => void, onToolUse?: (toolCall: ToolCall) => void): Promise<ChatResponse> {
     let lastError: Error | undefined;
     for (const model of this.models) {
       try {
-        return await this.base.chatStream!({ ...request, model }, onDelta, onToolUse);
+        return await this.base.chatStream!({ ...request, model }, onDelta, onThinkingDelta, onToolUse);
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
         if (!this.isRetryable(lastError)) throw lastError;

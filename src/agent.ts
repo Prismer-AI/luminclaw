@@ -16,7 +16,7 @@
  * @module agent
  */
 
-import type { Provider, ChatResponse, Message, ToolSpec, ThinkingLevel, ToolCall } from './provider.js';
+import type { Provider, ChatResponse, Message, ToolSpec, ThinkingLevel, ToolCall, ContentBlock } from './provider.js';
 import type { ToolRegistry, ToolContext } from './tools.js';
 import type { Observer } from './observer.js';
 import type { AgentConfig, AgentRegistry } from './agents.js';
@@ -109,6 +109,13 @@ const MAX_SUBAGENT_DEPTH = 5;
 
 // ── Helpers ─────────────────────────────────────────────
 
+/** Get approximate char length of message content (handles multimodal). */
+function contentLength(content: string | ContentBlock[] | null | undefined): number {
+  if (!content) return 0;
+  if (typeof content === 'string') return content.length;
+  return content.reduce((s, b) => s + ('text' in b ? b.text.length : 200), 0);
+}
+
 function compactToolResult(output: string): string {
   if (output.length <= MAX_TOOL_RESULT_CHARS) return output;
   const head = output.slice(0, 90_000);
@@ -118,13 +125,13 @@ function compactToolResult(output: string): string {
 }
 
 function truncateOldestTurns(messages: Message[], maxChars: number): Message[] {
-  const total = messages.reduce((s, m) => s + (m.content?.length ?? 0) + 50, 0);
+  const total = messages.reduce((s, m) => s + contentLength(m.content) + 50, 0);
   if (total <= maxChars) return messages;
   const system = messages[0];
   const recentCount = Math.min(6, messages.length - 1);
   const tail = messages.slice(-recentCount);
   const middle = messages.slice(1, -recentCount);
-  let currentSize = [system, ...tail].reduce((s, m) => s + (m.content?.length ?? 0) + 50, 0);
+  let currentSize = [system, ...tail].reduce((s, m) => s + contentLength(m.content) + 50, 0);
   const kept: Message[] = [];
   for (let i = middle.length - 1; i >= 0; i--) {
     const size = (middle[i].content?.length ?? 0) + 50;
@@ -333,7 +340,9 @@ export class PrismerAgent {
       return result;
     }
 
-    const messages = session.buildMessages(cleanInput, this.systemPrompt, memoryContext);
+    // Persist user input to session before buildMessages
+    session.addMessage({ role: 'user', content: cleanInput });
+    const messages = session.buildMessages(this.systemPrompt, memoryContext);
     const agentConfig = this.agents.get(this.agentId);
     const toolSpecs = this.tools.getSpecs(agentConfig?.tools ?? undefined);
     if ((!agentConfig || agentConfig.mode === 'primary') && this.agents.getDelegatableAgents().length > 0 && this.depth < MAX_SUBAGENT_DEPTH) {
@@ -373,8 +382,8 @@ export class PrismerAgent {
 
       if (this.hooks && state.iteration === 1) {
         const sysIdx = state.messages.findIndex(m => m.role === 'system');
-        if (sysIdx >= 0 && state.messages[sysIdx].content) {
-          state.messages[sysIdx].content = await this.hooks.runBeforePrompt(hookCtx, state.messages[sysIdx].content!);
+        if (sysIdx >= 0 && typeof state.messages[sysIdx].content === 'string') {
+          state.messages[sysIdx].content = await this.hooks.runBeforePrompt(hookCtx, state.messages[sysIdx].content as string);
         }
       }
 

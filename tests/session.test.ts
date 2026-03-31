@@ -32,9 +32,10 @@ describe('Session', () => {
     expect(s.lastActivity).toBeGreaterThanOrEqual(before);
   });
 
-  it('buildMessages includes system prompt + user input', () => {
+  it('buildMessages includes system prompt + user input from history', () => {
     const s = new Session('s1');
-    const msgs = s.buildMessages('what is AI?', 'You are an assistant.');
+    s.addMessage({ role: 'user', content: 'what is AI?' });
+    const msgs = s.buildMessages('You are an assistant.');
 
     expect(msgs).toHaveLength(2);
     expect(msgs[0]).toEqual({ role: 'system', content: 'You are an assistant.' });
@@ -43,7 +44,8 @@ describe('Session', () => {
 
   it('buildMessages includes memory context in system prompt', () => {
     const s = new Session('s1');
-    const msgs = s.buildMessages('hello', 'Base prompt', 'User prefers concise answers');
+    s.addMessage({ role: 'user', content: 'hello' });
+    const msgs = s.buildMessages('Base prompt', 'User prefers concise answers');
 
     expect(msgs[0].content).toContain('Base prompt');
     expect(msgs[0].content).toContain('## Relevant Memory');
@@ -54,10 +56,11 @@ describe('Session', () => {
     const s = new Session('s1');
     s.addMessage({ role: 'user', content: 'first question' });
     s.addMessage({ role: 'assistant', content: 'first answer' });
+    s.addMessage({ role: 'user', content: 'second question' });
 
-    const msgs = s.buildMessages('second question', 'System prompt');
+    const msgs = s.buildMessages('System prompt');
 
-    expect(msgs).toHaveLength(4); // system + 2 history + current user
+    expect(msgs).toHaveLength(4); // system + 3 history
     expect(msgs[1]).toEqual({ role: 'user', content: 'first question' });
     expect(msgs[2]).toEqual({ role: 'assistant', content: 'first answer' });
     expect(msgs[3]).toEqual({ role: 'user', content: 'second question' });
@@ -66,8 +69,9 @@ describe('Session', () => {
   it('buildMessages includes compaction summary', () => {
     const s = new Session('s1');
     s.compactionSummary = 'Previous discussion about machine learning.';
+    s.addMessage({ role: 'user', content: 'continue' });
 
-    const msgs = s.buildMessages('continue', 'System');
+    const msgs = s.buildMessages('System');
 
     expect(msgs).toHaveLength(4); // system + summary pair + user
     expect(msgs[1].content).toContain('[Earlier Conversation Summary]');
