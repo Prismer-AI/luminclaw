@@ -128,6 +128,8 @@ pub struct ChatResponse {
     pub tool_calls: Vec<ToolCall>,
     pub thinking: Option<String>,
     pub usage: Option<Usage>,
+    /// Why the model stopped: "stop", "tool_calls", "length", etc.
+    pub finish_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -259,6 +261,7 @@ impl OpenAIProvider {
         let mut thinking_parts = Vec::new();
         let mut tool_calls: Vec<ToolCallAccum> = Vec::new();
         let mut usage = None;
+        let mut finish_reason: Option<String> = None;
 
         let mut stream = res.bytes_stream();
         let mut buffer = String::new();
@@ -320,6 +323,11 @@ impl OpenAIProvider {
                                     completion_tokens: u["completion_tokens"].as_u64().unwrap_or(0) as u32,
                                 });
                             }
+
+                            // Finish reason
+                            if let Some(fr) = json["choices"][0]["finish_reason"].as_str() {
+                                finish_reason = Some(fr.to_string());
+                            }
                         }
                     }
                 }
@@ -355,7 +363,7 @@ impl OpenAIProvider {
         let thinking = if thinking_parts.is_empty() { None } else { Some(thinking_parts.join("")) };
         // Some models put all content in reasoning with empty content — use thinking as fallback
         let text = if text.is_empty() { thinking.clone().unwrap_or_default() } else { text };
-        Ok(ChatResponse { text, tool_calls: parsed_tool_calls, thinking, usage })
+        Ok(ChatResponse { text, tool_calls: parsed_tool_calls, thinking, usage, finish_reason })
     }
 
     fn parse_response(text: &str) -> Result<ChatResponse, ProviderError> {
@@ -393,7 +401,9 @@ impl OpenAIProvider {
             completion_tokens: u["completion_tokens"].as_u64().unwrap_or(0) as u32,
         });
 
-        Ok(ChatResponse { text: response_text, tool_calls, thinking, usage })
+        let finish_reason = choice["finish_reason"].as_str().map(|s| s.to_string());
+
+        Ok(ChatResponse { text: response_text, tool_calls, thinking, usage, finish_reason })
     }
 }
 
@@ -960,6 +970,53 @@ mod tests {
     fn text_content_helper_returns_none_for_blocks() {
         let msg = Message::user_multimodal(vec![ContentBlock::Text { text: "hi".into() }]);
         assert_eq!(msg.text_content(), None);
+    }
+
+    // ── finish_reason ──
+
+    #[test]
+    fn parse_response_with_finish_reason_stop() {
+        let raw = json!({
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]
+        });
+        let resp = OpenAIProvider::parse_response(&raw.to_string()).unwrap();
+        assert_eq!(resp.finish_reason.as_deref(), Some("stop"));
+    }
+
+    #[test]
+    fn parse_response_with_finish_reason_length() {
+        let raw = json!({
+            "choices": [{"message": {"content": "truncated..."}, "finish_reason": "length"}]
+        });
+        let resp = OpenAIProvider::parse_response(&raw.to_string()).unwrap();
+        assert_eq!(resp.finish_reason.as_deref(), Some("length"));
+    }
+
+    #[test]
+    fn parse_response_with_finish_reason_tool_calls() {
+        let raw = json!({
+            "choices": [{
+                "message": {"content": null, "tool_calls": [{"id": "c1", "function": {"name": "bash", "arguments": "{}"}}]},
+                "finish_reason": "tool_calls"
+            }]
+        });
+        let resp = OpenAIProvider::parse_response(&raw.to_string()).unwrap();
+        assert_eq!(resp.finish_reason.as_deref(), Some("tool_calls"));
+    }
+
+    #[test]
+    fn parse_response_no_finish_reason() {
+        let raw = json!({
+            "choices": [{"message": {"content": "hi"}}]
+        });
+        let resp = OpenAIProvider::parse_response(&raw.to_string()).unwrap();
+        assert!(resp.finish_reason.is_none());
+    }
+
+    #[test]
+    fn chat_response_default_has_no_finish_reason() {
+        let resp = ChatResponse::default();
+        assert!(resp.finish_reason.is_none());
     }
 }
 
