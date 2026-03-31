@@ -14,6 +14,13 @@ import { EventBus } from '../src/sse.js';
 import { Session } from '../src/session.js';
 import type { Provider, ChatRequest, ChatResponse } from '../src/provider.js';
 
+/** Drain an AsyncGenerator, discarding yielded values, and return the final value. */
+async function drainGenerator<T>(gen: AsyncGenerator<unknown, T>): Promise<T> {
+  let r = await gen.next();
+  while (!r.done) r = await gen.next();
+  return r.value;
+}
+
 // ── Mock Provider ──────────────────────────────────────
 
 function createMockProvider(responses: ChatResponse[]): Provider {
@@ -79,7 +86,7 @@ describe('PrismerAgent', () => {
       ]);
       const agent = createAgent(provider);
       const session = new Session('test-1');
-      const result = await agent.processMessage('hi', session);
+      const result = await drainGenerator(agent.processMessage('hi', session));
       expect(result.text).toBe('Hello!');
       expect(result.toolsUsed).toEqual([]);
       expect(result.iterations).toBe(1);
@@ -95,7 +102,7 @@ describe('PrismerAgent', () => {
       ]);
       const agent = createAgent(provider);
       const session = new Session('test-2');
-      const result = await agent.processMessage('echo test', session);
+      const result = await drainGenerator(agent.processMessage('echo test', session));
       expect(result.text).toBe('Got echo result.');
       expect(result.toolsUsed).toContain('echo');
       expect(result.iterations).toBe(2);
@@ -113,7 +120,7 @@ describe('PrismerAgent', () => {
       ]);
       const agent = createAgent(provider);
       const session = new Session('test-compact');
-      const result = await agent.processMessage('get big data', session);
+      const result = await drainGenerator(agent.processMessage('get big data', session));
 
       // The tool result message in session should be compacted
       const toolMsg = session.messages.find(m => m.role === 'tool');
@@ -133,7 +140,7 @@ describe('PrismerAgent', () => {
       ]);
       const agent = createAgent(provider);
       const session = new Session('test-no-compact');
-      await agent.processMessage('echo', session);
+      await drainGenerator(agent.processMessage('echo', session));
 
       const toolMsg = session.messages.find(m => m.role === 'tool');
       expect(toolMsg!.content).toBe('Echo: hello');
@@ -152,7 +159,7 @@ describe('PrismerAgent', () => {
       ]);
       const agent = createAgent(provider);
       const session = new Session('test-doom');
-      const result = await agent.processMessage('do something', session);
+      const result = await drainGenerator(agent.processMessage('do something', session));
       expect(result.text).toContain('repeated tool failures');
     });
   });
@@ -172,7 +179,7 @@ describe('PrismerAgent', () => {
       const provider = createMockProvider(responses);
       const agent = createAgent(provider);
       const session = new Session('test-repetition');
-      const result = await agent.processMessage('repeat', session);
+      const result = await drainGenerator(agent.processMessage('repeat', session));
       expect(result.text).toContain('repetitive tool calls');
     });
 
@@ -187,7 +194,7 @@ describe('PrismerAgent', () => {
       ]);
       const agent = createAgent(provider);
       const session = new Session('test-different');
-      const result = await agent.processMessage('various', session);
+      const result = await drainGenerator(agent.processMessage('various', session));
       expect(result.text).toBe('All done.');
       expect(result.text).not.toContain('repetitive');
     });
@@ -221,7 +228,7 @@ describe('PrismerAgent', () => {
       });
 
       const session = new Session('test-max-iter');
-      const result = await agent.processMessage('loop forever', session);
+      const result = await drainGenerator(agent.processMessage('loop forever', session));
       // Should stop — either via repetition detection or max iterations
       expect(result.iterations).toBeLessThanOrEqual(6);
     });
@@ -234,7 +241,7 @@ describe('PrismerAgent', () => {
       ]);
       const agent = createAgent(provider);
       const session = new Session('test-thinking');
-      const result = await agent.processMessage('think hard', session);
+      const result = await drainGenerator(agent.processMessage('think hard', session));
       expect(result.text).toBe('Answer.');
       expect(result.thinking).toBe('I need to think about this...');
     });
@@ -250,7 +257,7 @@ describe('PrismerAgent', () => {
       ]);
       const agent = createAgent(provider);
       const session = new Session('test-reasoning-roundtrip');
-      await agent.processMessage('reason and act', session);
+      await drainGenerator(agent.processMessage('reason and act', session));
 
       // Check that the assistant message with tool call has reasoningContent
       const assistantMsgs = session.messages.filter(m => m.role === 'assistant');
@@ -266,7 +273,7 @@ describe('PrismerAgent', () => {
       };
       const agent = createAgent(provider);
       const session = new Session('test-error');
-      const result = await agent.processMessage('fail', session);
+      const result = await drainGenerator(agent.processMessage('fail', session));
       expect(result.text).toContain('Error: Network down');
     });
 
@@ -280,7 +287,7 @@ describe('PrismerAgent', () => {
       ]);
       const agent = createAgent(provider);
       const session = new Session('test-unknown-tool');
-      const result = await agent.processMessage('use unknown', session);
+      const result = await drainGenerator(agent.processMessage('use unknown', session));
       // Should recover — unknown tool returns error, agent continues
       expect(result.text).toBe('Recovered.');
     });
@@ -302,7 +309,7 @@ describe('PrismerAgent', () => {
       ]);
       const agent = createAgent(provider);
       const session = new Session('test-usage');
-      const result = await agent.processMessage('track usage', session);
+      const result = await drainGenerator(agent.processMessage('track usage', session));
       expect(result.usage).toBeDefined();
       expect(result.usage!.promptTokens).toBe(300);
       expect(result.usage!.completionTokens).toBe(130);

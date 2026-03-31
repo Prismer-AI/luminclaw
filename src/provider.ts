@@ -67,6 +67,8 @@ export interface ChatRequest {
   maxTokens?: number;
   stream?: boolean;
   thinkingLevel?: ThinkingLevel;
+  /** Optional AbortSignal to cancel the request. */
+  signal?: AbortSignal;
 }
 
 /** A parsed tool call from the LLM response. */
@@ -82,6 +84,8 @@ export interface ChatResponse {
   toolCalls?: ToolCall[];
   thinking?: string;
   usage?: { promptTokens: number; completionTokens: number };
+  /** Why the model stopped generating. `'length'` means output was truncated. */
+  finishReason?: 'stop' | 'tool_calls' | 'length' | string;
 }
 
 // ── Provider Interface ───────────────────────────────────
@@ -93,8 +97,8 @@ export interface ChatResponse {
 export interface Provider {
   /** Non-streaming chat completion. */
   chat(request: ChatRequest): Promise<ChatResponse>;
-  /** Streaming chat completion — calls `onDelta` for each text token. */
-  chatStream?(request: ChatRequest, onDelta: (delta: string) => void): Promise<ChatResponse>;
+  /** Streaming chat completion — calls `onDelta` for each text token, and optionally `onToolUse` when a tool_use block is fully parsed. */
+  chatStream?(request: ChatRequest, onDelta: (delta: string) => void, onToolUse?: (toolCall: ToolCall) => void): Promise<ChatResponse>;
   /** Human-readable provider identifier. */
   name(): string;
 }
@@ -154,7 +158,7 @@ export class OpenAICompatibleProvider implements Provider {
         'Authorization': `Bearer ${this.config.apiKey}`,
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(300_000),
+      signal: request.signal ?? AbortSignal.timeout(300_000),
     });
 
     if (!res.ok) {
@@ -166,7 +170,7 @@ export class OpenAICompatibleProvider implements Provider {
     return this.parseResponse(data);
   }
 
-  async chatStream(request: ChatRequest, onDelta: (delta: string) => void): Promise<ChatResponse> {
+  async chatStream(request: ChatRequest, onDelta: (delta: string) => void, onToolUse?: (toolCall: ToolCall) => void): Promise<ChatResponse> {
     const model = request.model ?? this.config.defaultModel;
 
     const body: Record<string, unknown> = {
@@ -197,7 +201,7 @@ export class OpenAICompatibleProvider implements Provider {
         'Authorization': `Bearer ${this.config.apiKey}`,
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(300_000),
+      signal: request.signal ?? AbortSignal.timeout(300_000),
     });
 
     if (!res.ok) {
@@ -208,8 +212,10 @@ export class OpenAICompatibleProvider implements Provider {
     // Parse SSE stream
     let fullText = '';
     let reasoningText = '';
+    let finishReason: string | undefined;
     const toolCalls: ToolCall[] = [];
     const toolCallBuffers = new Map<number, { id: string; name: string; args: string }>();
+    const finalizedIndices = new Set<number>();
     let usage: { promptTokens: number; completionTokens: number } | undefined;
 
     const reader = res.body?.getReader();
@@ -251,6 +257,19 @@ export class OpenAICompatibleProvider implements Provider {
           if (delta.tool_calls) {
             for (const tc of delta.tool_calls as any[]) {
               const idx = tc.index ?? 0;
+              // When a new index appears with an id, the previous tool calls are complete
+              if (tc.id && !toolCallBuffers.has(idx) && onToolUse) {
+                for (const [prevIdx, prevBuf] of toolCallBuffers) {
+                  if (!finalizedIndices.has(prevIdx)) {
+                    finalizedIndices.add(prevIdx);
+                    try {
+                      onToolUse({ id: prevBuf.id, name: prevBuf.name, arguments: JSON.parse(prevBuf.args || '{}') });
+                    } catch {
+                      onToolUse({ id: prevBuf.id, name: prevBuf.name, arguments: {} });
+                    }
+                  }
+                }
+              }
               if (!toolCallBuffers.has(idx)) {
                 toolCallBuffers.set(idx, { id: tc.id ?? '', name: '', args: '' });
               }
@@ -261,6 +280,10 @@ export class OpenAICompatibleProvider implements Provider {
             }
           }
 
+          // Finish reason
+          const fr = (chunk as any).choices?.[0]?.finish_reason;
+          if (fr) finishReason = fr;
+
           // Usage
           if ((chunk as any).usage) {
             usage = {
@@ -270,6 +293,20 @@ export class OpenAICompatibleProvider implements Provider {
           }
         } catch {
           // Skip malformed SSE lines
+        }
+      }
+    }
+
+    // Emit remaining un-finalized tool calls via onToolUse
+    if (onToolUse) {
+      for (const [idx, buf] of toolCallBuffers) {
+        if (!finalizedIndices.has(idx)) {
+          finalizedIndices.add(idx);
+          try {
+            onToolUse({ id: buf.id, name: buf.name, arguments: JSON.parse(buf.args || '{}') });
+          } catch {
+            onToolUse({ id: buf.id, name: buf.name, arguments: {} });
+          }
         }
       }
     }
@@ -291,6 +328,7 @@ export class OpenAICompatibleProvider implements Provider {
       text: fullText,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
       thinking: reasoningText || undefined,
+      finishReason,
       usage,
     };
   }
@@ -354,6 +392,7 @@ export class OpenAICompatibleProvider implements Provider {
       text: message.content ?? '',
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
       thinking: message.reasoning_content ?? message.thinking ?? undefined,
+      finishReason: choice.finish_reason ?? undefined,
       usage: usage ? {
         promptTokens: usage.prompt_tokens ?? 0,
         completionTokens: usage.completion_tokens ?? 0,
@@ -407,11 +446,11 @@ export class FallbackProvider implements Provider {
     throw lastError!;
   }
 
-  async chatStream(request: ChatRequest, onDelta: (d: string) => void): Promise<ChatResponse> {
+  async chatStream(request: ChatRequest, onDelta: (d: string) => void, onToolUse?: (toolCall: ToolCall) => void): Promise<ChatResponse> {
     let lastError: Error | undefined;
     for (const model of this.models) {
       try {
-        return await this.base.chatStream!({ ...request, model }, onDelta);
+        return await this.base.chatStream!({ ...request, model }, onDelta, onToolUse);
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
         if (!this.isRetryable(lastError)) throw lastError;

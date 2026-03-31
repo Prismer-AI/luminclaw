@@ -138,6 +138,7 @@ describe('FallbackProvider', () => {
         2,
         expect.objectContaining({ model: 'model-b' }),
         expect.any(Function),
+        undefined,
       );
     });
   });

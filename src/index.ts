@@ -262,6 +262,8 @@ export interface RunAgentOptions {
   bus?: EventBus;
   /** Called when agent finishes (server mode sends result over WS instead of stdout). */
   onResult?: (result: AgentResult, sessionId: string) => void;
+  /** Optional AbortSignal to cancel the agent loop externally. */
+  abortSignal?: AbortSignal;
 }
 
 /**
@@ -323,10 +325,15 @@ export async function runAgent(input: InputMessage, opts: RunAgentOptions = {}):
     maxIterations: inputCfg.maxIterations ?? cfg.agent.maxIterations,
     agentId,
     workspaceDir,
+    abortSignal: opts.abortSignal,
   });
 
   try {
-    const result = await agent.processMessage(input.content ?? '', session);
+    // Consume the AsyncGenerator — events are published to bus internally
+    const gen = agent.processMessage(input.content ?? '', session);
+    let iterResult = await gen.next();
+    while (!iterResult.done) iterResult = await gen.next();
+    const result = iterResult.value;
 
     if (opts.onResult) {
       opts.onResult(result, sessionId);
@@ -380,3 +387,6 @@ export { ChannelManager } from './channels/manager.js';
 export type { ChannelAdapter, IncomingMessage as ChannelMessage } from './channels/types.js';
 export { loadConfig, resetConfig, LuminConfigSchema, type LuminConfig } from './config.js';
 export { createLogger, type Logger, type LogLevel } from './log.js';
+export { microcompact, CLEARED_MARKER } from './microcompact.js';
+export { estimateTokens, estimateMessageTokens } from './tokens.js';
+export { StreamingToolExecutor, type ToolCallInfo, type ToolResult, type TrackedTool, type ToolStatus, type ExecuteFn } from './streaming-executor.js';

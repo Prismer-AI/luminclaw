@@ -4,23 +4,28 @@
  *
  * The {@link PrismerAgent} class orchestrates:
  *   1. LLM chat requests (streaming or batch)
- *   2. Parallel tool execution with context injection
+ *   2. Partitioned tool execution (read-only concurrent, write serial)
  *   3. Sub-agent delegation via `@mention` or the `delegate` tool
  *   4. Approval gates for sensitive tool calls (bash rm, mv, etc.)
  *   5. Doom-loop detection (consecutive errors + repetitive tool calls)
- *   6. Automatic context compaction when the window overflows
+ *   6. Three-layer context management (microcompact → truncate → compaction)
+ *   7. Recovery paths (reactive compact, output truncation recovery)
+ *   8. AbortController chain (parent→child cancellation propagation)
+ *   9. AsyncGenerator event stream (yield events + EventBus dual output)
  *
  * @module agent
  */
 
-import type { Provider, ChatResponse, Message, ToolSpec, ThinkingLevel } from './provider.js';
+import type { Provider, ChatResponse, Message, ToolSpec, ThinkingLevel, ToolCall } from './provider.js';
 import type { ToolRegistry, ToolContext } from './tools.js';
 import type { Observer } from './observer.js';
 import type { AgentConfig, AgentRegistry } from './agents.js';
-import type { EventBus } from './sse.js';
+import type { EventBus, AgentEvent } from './sse.js';
 import type { HookRegistry, HookContext } from './hooks.js';
 import { Session, type Directive } from './session.js';
 import { compactConversation, repairOrphanedToolResults, memoryFlushBeforeCompaction } from './compaction.js';
+import { microcompact } from './microcompact.js';
+import { estimateMessageTokens } from './tokens.js';
 import type { MemoryStore } from './memory.js';
 import { loadConfig } from './config.js';
 import { createLogger } from './log.js';
@@ -48,39 +53,48 @@ export interface AgentResult {
 
 /**
  * Options for constructing a {@link PrismerAgent}.
- *
- * Most fields have sensible defaults from the unified config ({@link loadConfig}).
  */
 export interface AgentOptions {
-  /** LLM provider for chat completions. */
   provider: Provider;
-  /** Registry of available tools. */
   tools: ToolRegistry;
-  /** Observability backend for lifecycle events and metrics. */
   observer: Observer;
-  /** Registry of agent personalities (primary + sub-agents). */
   agents: AgentRegistry;
-  /** Optional event bus for real-time streaming. */
   bus?: EventBus;
-  /** Optional hook registry for lifecycle extension points. */
   hooks?: HookRegistry;
-  /** Optional persistent memory store. */
   memoryStore?: MemoryStore;
-  /** System prompt injected as the first message. */
   systemPrompt: string;
-  /** LLM model identifier (overrides config default). */
   model?: string;
-  /** Maximum tool-calling iterations per request. */
   maxIterations?: number;
-  /** Agent identity key (e.g., `'researcher'`, `'latex-expert'`). */
   agentId?: string;
-  /** Workspace root directory inside the container. */
   workspaceDir?: string;
-  /** Thinking/reasoning level control. */
   thinkingLevel?: ThinkingLevel;
+  /** AbortSignal for external cancellation. */
+  abortSignal?: AbortSignal;
+  /** Recursion depth — prevents infinite sub-agent delegation. */
+  _depth?: number;
 }
 
-// ── Config-driven Constants ──────────────────────────────
+// ── LoopState ───────────────────────────────────────────
+
+interface Transition {
+  reason: 'next_turn' | 'reactive_compact' | 'output_recovery' | 'model_fallback';
+  detail?: unknown;
+}
+
+interface LoopState {
+  messages: Message[];
+  iteration: number;
+  consecutiveErrors: number;
+  recentToolSigs: string[];
+  totalUsage: { promptTokens: number; completionTokens: number };
+  lastText: string;
+  lastThinking?: string;
+  hasAttemptedReactiveCompact: boolean;
+  outputRecoveryCount: number;
+  transition?: Transition;
+}
+
+// ── Config Constants ─────────────────────────────────────
 
 const cfg = loadConfig();
 const DOOM_LOOP_THRESHOLD = cfg.agent.doomLoopThreshold;
@@ -90,10 +104,11 @@ const REPETITION_THRESHOLD = cfg.agent.repetitionThreshold;
 const APPROVAL_TIMEOUT_MS = cfg.approval.timeoutMs;
 const SENSITIVE_TOOLS = new Set(cfg.approval.sensitiveTools);
 const SENSITIVE_BASH_PATTERNS = cfg.approval.bashPatterns.map(p => new RegExp(p));
+const MAX_OUTPUT_RECOVERY = 3;
+const MAX_SUBAGENT_DEPTH = 5;
 
 // ── Helpers ─────────────────────────────────────────────
 
-/** Compact oversized tool results (head + tail with gap marker) */
 function compactToolResult(output: string): string {
   if (output.length <= MAX_TOOL_RESULT_CHARS) return output;
   const head = output.slice(0, 90_000);
@@ -102,33 +117,42 @@ function compactToolResult(output: string): string {
   return `${head}\n\n[... ${omitted} chars omitted ...]\n\n${tail}`;
 }
 
-/** Truncate oldest conversation turns to fit context budget */
 function truncateOldestTurns(messages: Message[], maxChars: number): Message[] {
   const total = messages.reduce((s, m) => s + (m.content?.length ?? 0) + 50, 0);
   if (total <= maxChars) return messages;
-
-  const system = messages[0]; // Always keep system prompt
+  const system = messages[0];
   const recentCount = Math.min(6, messages.length - 1);
   const tail = messages.slice(-recentCount);
   const middle = messages.slice(1, -recentCount);
-
   let currentSize = [system, ...tail].reduce((s, m) => s + (m.content?.length ?? 0) + 50, 0);
   const kept: Message[] = [];
-
-  // Keep from newest to oldest
   for (let i = middle.length - 1; i >= 0; i--) {
     const size = (middle[i].content?.length ?? 0) + 50;
     if (currentSize + size > maxChars) break;
     currentSize += size;
     kept.unshift(middle[i]);
   }
-
-  const truncated = messages.length - 1 - recentCount - kept.length;
-  if (truncated > 0) {
-    log.debug('context-guard truncated oldest messages', { truncated, budget: maxChars });
-  }
-
   return [system, ...kept, ...tail];
+}
+
+function partitionToolCalls(
+  calls: Array<{ id: string; name: string; arguments: Record<string, unknown> }>,
+  tools: ToolRegistry,
+): Array<{ concurrent: boolean; calls: typeof calls }> {
+  const batches: Array<{ concurrent: boolean; calls: typeof calls }> = [];
+  for (const call of calls) {
+    const tool = tools.get(call.name);
+    const safe = tool?.isConcurrencySafe?.(call.arguments) ?? false;
+    const last = batches[batches.length - 1];
+    if (last && safe && last.concurrent) { last.calls.push(call); }
+    else { batches.push({ concurrent: safe, calls: [call] }); }
+  }
+  return batches;
+}
+
+function isPromptTooLong(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /prompt.?too.?long|context.?length|token.?limit|413/i.test(msg);
 }
 
 // ── Agent ────────────────────────────────────────────────
@@ -146,9 +170,9 @@ export class PrismerAgent {
   private readonly maxIterations: number;
   private readonly agentId: string;
   private readonly workspaceDir: string;
+  private readonly depth: number;
+  private readonly abortSignal?: AbortSignal;
   private thinkingLevel?: ThinkingLevel;
-
-  /** Pending approval resolvers — keyed by toolId, resolved by external approval response */
   private approvalResolvers = new Map<string, (approved: boolean) => void>();
 
   constructor(options: AgentOptions) {
@@ -165,12 +189,12 @@ export class PrismerAgent {
     this.agentId = options.agentId ?? 'researcher';
     this.workspaceDir = options.workspaceDir ?? '/workspace';
     this.thinkingLevel = options.thinkingLevel;
+    this.depth = options._depth ?? 0;
+    this.abortSignal = options.abortSignal;
   }
 
-  /** Check if a tool call needs human approval before execution */
   needsApproval(toolName: string, args: Record<string, unknown>): boolean {
     if (!SENSITIVE_TOOLS.has(toolName)) return false;
-    // bash: only flag destructive commands
     if (toolName === 'bash') {
       const cmd = String(args.command || args.cmd || '');
       return SENSITIVE_BASH_PATTERNS.some(p => p.test(cmd));
@@ -178,41 +202,29 @@ export class PrismerAgent {
     return true;
   }
 
-  /** Resolve a pending approval request (called from WS handler) */
   resolveApproval(toolId: string, approved: boolean): void {
     const resolver = this.approvalResolvers.get(toolId);
-    if (resolver) {
-      resolver(approved);
-      this.approvalResolvers.delete(toolId);
-    }
+    if (resolver) { resolver(approved); this.approvalResolvers.delete(toolId); }
   }
 
-  /** Wait for external approval with timeout */
   private waitForApproval(toolId: string): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
       this.approvalResolvers.set(toolId, resolve);
       setTimeout(() => {
-        if (this.approvalResolvers.has(toolId)) {
-          this.approvalResolvers.delete(toolId);
-          resolve(false); // Timeout → reject (safe default)
-        }
+        if (this.approvalResolvers.has(toolId)) { this.approvalResolvers.delete(toolId); resolve(false); }
       }, APPROVAL_TIMEOUT_MS);
     });
   }
 
-  /**
-   * Scan /workspace/.openclaw/directives/ for directive files written by plugin tools.
-   * Emits them on the EventBus and accumulates in session, then deletes processed files.
-   */
+  private buildSignal(): AbortSignal {
+    const timeoutSignal = AbortSignal.timeout(300_000);
+    return this.abortSignal ? AbortSignal.any([this.abortSignal, timeoutSignal]) : timeoutSignal;
+  }
+
   private scanDirectiveFiles(session: Session, knownFiles?: Set<string>): void {
     const dirPath = `${this.workspaceDir}/.openclaw/directives`;
     let files: string[];
-    try {
-      files = readdirSync(dirPath).filter(f => f.endsWith('.json'));
-    } catch {
-      return; // Directory doesn't exist yet
-    }
-
+    try { files = readdirSync(dirPath).filter(f => f.endsWith('.json')); } catch { return; }
     for (const file of files) {
       if (knownFiles && knownFiles.has(file)) continue;
       try {
@@ -223,466 +235,319 @@ export class PrismerAgent {
         this.bus?.publish({ type: 'directive', data: { type: directive.type, payload: directive.payload, timestamp: directive.timestamp } });
         this.observer.recordEvent({ type: 'directive_emit', timestamp: Date.now(), data: { type: directive.type, payload: directive.payload } });
         unlinkSync(`${dirPath}/${file}`);
-      } catch {
-        // Skip malformed files
-      }
+      } catch { /* skip */ }
     }
   }
 
-  /** Snapshot current directive files (before tool execution) */
   private snapshotDirectiveFiles(): Set<string> {
     const dirPath = `${this.workspaceDir}/.openclaw/directives`;
-    try {
-      return new Set(readdirSync(dirPath).filter(f => f.endsWith('.json')));
-    } catch {
-      return new Set();
-    }
+    try { return new Set(readdirSync(dirPath).filter(f => f.endsWith('.json'))); } catch { return new Set(); }
   }
 
-  /** Main entry point — process a user message through the agent loop */
-  async processMessage(input: string, session: Session, memoryContext?: string): Promise<AgentResult> {
-    const startMs = Date.now();
+  /** Execute a single tool call, collecting events for later yielding. */
+  private async executeToolCall(
+    call: { id: string; name: string; arguments: Record<string, unknown> },
+    session: Session, toolsUsed: string[], hookCtx: HookContext,
+  ): Promise<{ result: { id: string; output: string; error: boolean }; events: AgentEvent[] }> {
+    const events: AgentEvent[] = [];
+    if (this.abortSignal?.aborted) {
+      return { result: { id: call.id, output: '[Aborted]', error: false }, events };
+    }
+    if (call.name === 'delegate') {
+      return this.handleDelegateCall(call, session, toolsUsed);
+    }
+    if (this.hooks) {
+      const hookResult = await this.hooks.runBeforeTool(hookCtx, call.name, call.arguments);
+      if (!hookResult.proceed) return { result: { id: call.id, output: '[Tool blocked by hook]', error: false }, events };
+      Object.assign(call.arguments, hookResult.args);
+    }
+    if (this.needsApproval(call.name, call.arguments)) {
+      const reason = `Tool "${call.name}" requires approval`;
+      events.push({ type: 'tool.approval_required', data: { sessionId: session.id, tool: call.name, toolId: call.id, args: call.arguments, reason } });
+      this.observer.recordEvent({ type: 'tool_call_start', timestamp: Date.now(), data: { name: call.name, approval: 'required' } });
+      const approved = await this.waitForApproval(call.id);
+      events.push({ type: 'tool.approval_response', data: { toolId: call.id, approved, reason: approved ? 'approved' : 'rejected/timeout' } });
+      if (!approved) return { result: { id: call.id, output: '[Tool blocked: approval denied or timed out]', error: false }, events };
+    }
+    this.observer.recordEvent({ type: 'tool_call_start', timestamp: Date.now(), data: { name: call.name, args: call.arguments } });
+    events.push({ type: 'tool.start', data: { sessionId: session.id, tool: call.name, toolId: call.id, args: call.arguments } });
+    const ctx: ToolContext = {
+      workspaceDir: this.workspaceDir, sessionId: session.id, agentId: this.agentId,
+      emit: (event) => {
+        if (event.type === 'directive') {
+          session.addPendingDirective(event.data as unknown as Directive);
+          events.push({ type: 'directive', data: event.data });
+          this.observer.recordEvent({ type: 'directive_emit', timestamp: Date.now(), data: event.data });
+        }
+      },
+    };
+    const result = await this.tools.execute(call.name, call.arguments, ctx);
+    toolsUsed.push(call.name);
+    this.observer.recordEvent({ type: 'tool_call_end', timestamp: Date.now(), data: { name: call.name, success: !result.error, outputLength: result.output.length } });
+    events.push({ type: 'tool.end', data: { sessionId: session.id, tool: call.name, toolId: call.id, result: (result.output || result.error || '').slice(0, 500) } });
+    if (this.hooks) await this.hooks.runAfterTool(hookCtx, call.name, result.output || result.error || '', !!result.error);
+    return { result: { id: call.id, output: result.error ? `Error: ${result.error}` : result.output, error: !!result.error }, events };
+  }
 
-    // Parse /think, /t, /nothink directives
+  /** Execute tools with read/write partitioning, returning results + events. */
+  private async executeToolsPartitioned(
+    toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }>,
+    session: Session, toolsUsed: string[], hookCtx: HookContext,
+  ): Promise<{ results: Array<{ id: string; output: string; error: boolean }>; events: AgentEvent[] }> {
+    const batches = partitionToolCalls(toolCalls, this.tools);
+    const allResults: Array<{ id: string; output: string; error: boolean }> = [];
+    const allEvents: AgentEvent[] = [];
+    for (const batch of batches) {
+      if (batch.concurrent && batch.calls.length > 1) {
+        const executions = await Promise.all(batch.calls.map(c => this.executeToolCall(c, session, toolsUsed, hookCtx)));
+        for (const exec of executions) { allEvents.push(...exec.events); allResults.push(exec.result); }
+      } else {
+        for (const call of batch.calls) {
+          const exec = await this.executeToolCall(call, session, toolsUsed, hookCtx);
+          allEvents.push(...exec.events); allResults.push(exec.result);
+        }
+      }
+    }
+    return { results: allResults, events: allEvents };
+  }
+
+  /** Main entry point — AsyncGenerator yielding AgentEvents, returning AgentResult. */
+  async *processMessage(input: string, session: Session, memoryContext?: string): AsyncGenerator<AgentEvent, AgentResult> {
+    const startMs = Date.now();
     let cleanInput = input;
     const thinkMatch = input.match(/^\/(think|t)\b\s*/i);
     const nothinkMatch = input.match(/^\/nothink\b\s*/i);
-    if (thinkMatch) {
-      this.thinkingLevel = 'high';
-      cleanInput = input.slice(thinkMatch[0].length).trim() || input;
-    } else if (nothinkMatch) {
-      this.thinkingLevel = 'off';
-      cleanInput = input.slice(nothinkMatch[0].length).trim() || input;
-    }
+    if (thinkMatch) { this.thinkingLevel = 'high'; cleanInput = input.slice(thinkMatch[0].length).trim() || input; }
+    else if (nothinkMatch) { this.thinkingLevel = 'off'; cleanInput = input.slice(nothinkMatch[0].length).trim() || input; }
 
     const hookCtx: HookContext = { sessionId: session.id, agentId: this.agentId };
+    this.observer.recordEvent({ type: 'agent_start', timestamp: startMs, data: { agentId: this.agentId, sessionId: session.id, input: cleanInput.slice(0, 200) } });
+    const startEvent: AgentEvent = { type: 'agent.start', data: { sessionId: session.id, agentId: this.agentId } };
+    this.bus?.publish(startEvent); yield startEvent;
 
-    this.observer.recordEvent({
-      type: 'agent_start',
-      timestamp: startMs,
-      data: { agentId: this.agentId, sessionId: session.id, input: cleanInput.slice(0, 200) },
-    });
-    this.bus?.publish({ type: 'agent.start', data: { sessionId: session.id, agentId: this.agentId } });
-
-    // Check @-mention for explicit sub-agent delegation
     const mention = this.agents.resolveFromMention(cleanInput);
     if (mention) {
-      const result = await this.delegateToSubAgent(mention.agentId, mention.message, session);
-      this.bus?.publish({ type: 'agent.end', data: { sessionId: session.id, toolsUsed: result.toolsUsed } });
+      const result = yield* this.delegateToSubAgent(mention.agentId, mention.message, session);
+      const endEvent: AgentEvent = { type: 'agent.end', data: { sessionId: session.id, toolsUsed: result.toolsUsed } };
+      this.bus?.publish(endEvent); yield endEvent;
       return result;
     }
 
-    // Build messages with system prompt + memory + history
     const messages = session.buildMessages(cleanInput, this.systemPrompt, memoryContext);
-
-    // Get tool specs (filter by agent config if sub-agent)
     const agentConfig = this.agents.get(this.agentId);
-    const allowedTools = agentConfig?.tools ?? undefined;
-    const toolSpecs = this.tools.getSpecs(allowedTools ?? undefined);
-
-    // Add delegate tool if this is the primary agent and sub-agents exist
-    if ((!agentConfig || agentConfig.mode === 'primary') && this.agents.getDelegatableAgents().length > 0) {
+    const toolSpecs = this.tools.getSpecs(agentConfig?.tools ?? undefined);
+    if ((!agentConfig || agentConfig.mode === 'primary') && this.agents.getDelegatableAgents().length > 0 && this.depth < MAX_SUBAGENT_DEPTH) {
       toolSpecs.push(this.getDelegateToolSpec());
     }
 
-    let iteration = 0;
     const toolsUsed: string[] = [];
-    let totalUsage = { promptTokens: 0, completionTokens: 0 };
-    let lastText = '';
-    let lastThinking: string | undefined;
-    let consecutiveErrors = 0;
-    const recentToolSigs: string[] = [];  // For repetition detection
+    let state: LoopState = {
+      messages, iteration: 0, consecutiveErrors: 0, recentToolSigs: [],
+      totalUsage: { promptTokens: 0, completionTokens: 0 },
+      lastText: '', lastThinking: undefined,
+      hasAttemptedReactiveCompact: false, outputRecoveryCount: 0,
+    };
 
-    while (iteration++ < this.maxIterations) {
-      // ── Context window guard with auto-compaction ──
-      const beforeCount = messages.length;
-      const truncated = truncateOldestTurns(messages, MAX_CONTEXT_CHARS);
+    while (state.iteration++ < this.maxIterations) {
+      if (this.abortSignal?.aborted) { state.lastText = '[Aborted by user]'; break; }
+
+      microcompact(state.messages, 5);
+
+      const beforeCount = state.messages.length;
+      const truncated = truncateOldestTurns(state.messages, MAX_CONTEXT_CHARS);
       if (truncated.length < beforeCount) {
-        // Extract dropped messages (skip system prompt at index 0)
-        const dropped = messages.slice(1, beforeCount - truncated.length + 1);
+        const dropped = state.messages.slice(1, beforeCount - truncated.length + 1);
         if (dropped.length > 2 && !session.compactionSummary) {
           try {
-            // Flush important facts to memory before compaction
-            if (this.memoryStore) {
-              try { await memoryFlushBeforeCompaction(this.provider, dropped, this.memoryStore, this.model); } catch { /* non-fatal */ }
-            }
-            const result = await compactConversation(this.provider, dropped, this.model);
-            session.compactionSummary = result.summary;
-            this.observer.recordEvent({
-              type: 'compaction',
-              timestamp: Date.now(),
-              data: { droppedCount: result.droppedCount, summaryChars: result.summaryChars },
-            });
-            this.bus?.publish({ type: 'compaction', data: { summary: result.summary.slice(0, 200), droppedCount: result.droppedCount } });
-          } catch { /* compaction failure is non-fatal */ }
+            if (this.memoryStore) { try { await memoryFlushBeforeCompaction(this.provider, dropped, this.memoryStore, this.model); } catch { /* */ } }
+            const r = await compactConversation(this.provider, dropped, this.model);
+            session.compactionSummary = r.summary;
+            this.observer.recordEvent({ type: 'compaction', timestamp: Date.now(), data: { droppedCount: r.droppedCount, summaryChars: r.summaryChars } });
+            const ev: AgentEvent = { type: 'compaction', data: { summary: r.summary.slice(0, 200), droppedCount: r.droppedCount } };
+            this.bus?.publish(ev); yield ev;
+          } catch { /* */ }
         }
-        messages.length = 0;
-        messages.push(...repairOrphanedToolResults(truncated));
+        state.messages.length = 0;
+        state.messages.push(...repairOrphanedToolResults(truncated));
       }
 
-      // ── Hook: before_prompt ──
-      if (this.hooks && iteration === 1) {
-        const sysIdx = messages.findIndex(m => m.role === 'system');
-        if (sysIdx >= 0 && messages[sysIdx].content) {
-          messages[sysIdx].content = await this.hooks.runBeforePrompt(hookCtx, messages[sysIdx].content!);
+      if (this.hooks && state.iteration === 1) {
+        const sysIdx = state.messages.findIndex(m => m.role === 'system');
+        if (sysIdx >= 0 && state.messages[sysIdx].content) {
+          state.messages[sysIdx].content = await this.hooks.runBeforePrompt(hookCtx, state.messages[sysIdx].content!);
         }
       }
 
-      // ── LLM Call ──
       const llmStart = Date.now();
-      this.observer.recordEvent({
-        type: 'llm_request',
-        timestamp: llmStart,
-        data: { iteration, model: this.model, messageCount: messages.length, toolCount: toolSpecs.length },
-      });
+      const signal = this.buildSignal();
+      this.observer.recordEvent({ type: 'llm_request', timestamp: llmStart, data: { iteration: state.iteration, model: this.model, messageCount: state.messages.length, toolCount: toolSpecs.length, estimatedTokens: estimateMessageTokens(state.messages) } });
 
       let response: ChatResponse;
       try {
         if (this.provider.chatStream && this.bus) {
-          // Streaming mode — emit text deltas
+          const streamEvents: AgentEvent[] = [];
           response = await this.provider.chatStream(
-            { messages, tools: toolSpecs.length > 0 ? toolSpecs : undefined, model: this.model, thinkingLevel: this.thinkingLevel },
-            (delta) => this.bus!.publish({ type: 'text.delta', data: { sessionId: session.id, delta } }),
+            { messages: state.messages, tools: toolSpecs.length > 0 ? toolSpecs : undefined, model: this.model, thinkingLevel: this.thinkingLevel, signal },
+            (delta) => { const ev: AgentEvent = { type: 'text.delta', data: { sessionId: session.id, delta } }; this.bus!.publish(ev); streamEvents.push(ev); },
           );
+          for (const ev of streamEvents) yield ev;
         } else {
-          response = await this.provider.chat({
-            messages,
-            tools: toolSpecs.length > 0 ? toolSpecs : undefined,
-            model: this.model,
-            thinkingLevel: this.thinkingLevel,
-          });
+          response = await this.provider.chat({ messages: state.messages, tools: toolSpecs.length > 0 ? toolSpecs : undefined, model: this.model, thinkingLevel: this.thinkingLevel, signal });
         }
       } catch (err) {
+        if (isPromptTooLong(err) && !state.hasAttemptedReactiveCompact) {
+          log.warn('prompt too long — attempting reactive compaction');
+          try {
+            const allButSystem = state.messages.slice(1);
+            const halfIdx = Math.floor(allButSystem.length / 2);
+            const toCompact = allButSystem.slice(0, halfIdx);
+            const toKeep = allButSystem.slice(halfIdx);
+            if (this.memoryStore) { try { await memoryFlushBeforeCompaction(this.provider, toCompact, this.memoryStore, this.model); } catch { /* */ } }
+            const compacted = await compactConversation(this.provider, toCompact, this.model);
+            session.compactionSummary = compacted.summary;
+            const ev: AgentEvent = { type: 'compaction', data: { summary: compacted.summary.slice(0, 200), droppedCount: toCompact.length } };
+            this.bus?.publish(ev); yield ev;
+            state = { ...state, messages: [state.messages[0], { role: 'user', content: `[Earlier Conversation Summary]\n${compacted.summary}` }, { role: 'assistant', content: 'Understood, I have the context from our earlier conversation.' }, ...repairOrphanedToolResults(toKeep)], hasAttemptedReactiveCompact: true, transition: { reason: 'reactive_compact', detail: { dropped: toCompact.length } } };
+            continue;
+          } catch { /* fall through */ }
+        }
         const message = err instanceof Error ? err.message : String(err);
-        this.observer.recordEvent({ type: 'error', timestamp: Date.now(), data: { error: message, iteration } });
-        this.bus?.publish({ type: 'error', data: { message } });
-        return this.buildResult(`Error: ${message}`, undefined, session, toolsUsed, totalUsage, iteration);
+        this.observer.recordEvent({ type: 'error', timestamp: Date.now(), data: { error: message, iteration: state.iteration } });
+        const errEv: AgentEvent = { type: 'error', data: { message } };
+        this.bus?.publish(errEv); yield errEv;
+        return this.buildResult(`Error: ${message}`, undefined, session, toolsUsed, state.totalUsage, state.iteration);
       }
 
-      this.observer.recordEvent({
-        type: 'llm_response',
-        timestamp: Date.now(),
-        data: {
-          duration_ms: Date.now() - llmStart,
-          hasToolCalls: !!response.toolCalls?.length,
-          textLength: response.text.length,
-          usage: response.usage,
-        },
-      });
+      this.observer.recordEvent({ type: 'llm_response', timestamp: Date.now(), data: { duration_ms: Date.now() - llmStart, hasToolCalls: !!response.toolCalls?.length, textLength: response.text.length, usage: response.usage } });
       this.observer.recordMetric('llm_latency_ms', Date.now() - llmStart);
+      if (response.usage) { state.totalUsage.promptTokens += response.usage.promptTokens; state.totalUsage.completionTokens += response.usage.completionTokens; }
+      state.lastText = response.text;
+      state.lastThinking = response.thinking;
 
-      if (response.usage) {
-        totalUsage.promptTokens += response.usage.promptTokens;
-        totalUsage.completionTokens += response.usage.completionTokens;
-      }
-
-      lastText = response.text;
-      lastThinking = response.thinking;
-
-      // Append assistant message to conversation
-      const assistantMsg: Message = {
-        role: 'assistant',
-        content: response.text || null,
-      };
-      // Preserve reasoning_content for thinking models (e.g., kimi-k2.5)
-      if (response.thinking) {
-        assistantMsg.reasoningContent = response.thinking;
-      }
+      const assistantMsg: Message = { role: 'assistant', content: response.text || null };
+      if (response.thinking) assistantMsg.reasoningContent = response.thinking;
       if (response.toolCalls?.length) {
-        assistantMsg.toolCalls = response.toolCalls.map(tc => ({
-          id: tc.id,
-          type: 'function' as const,
-          function: {
-            name: tc.name,
-            arguments: JSON.stringify(tc.arguments),
-          },
-        }));
+        assistantMsg.toolCalls = response.toolCalls.map(tc => ({ id: tc.id, type: 'function' as const, function: { name: tc.name, arguments: JSON.stringify(tc.arguments) } }));
       }
-      messages.push(assistantMsg);
+      state.messages.push(assistantMsg);
       session.addMessage(assistantMsg);
 
-      // ── No tool calls → final response ──
       if (!response.toolCalls?.length) {
-        // Emit non-streaming text if we didn't stream
+        if (response.finishReason === 'length' && state.outputRecoveryCount < MAX_OUTPUT_RECOVERY) {
+          const contMsg: Message = { role: 'user', content: 'Please continue from where you left off.' };
+          state.messages.push(contMsg); session.addMessage(contMsg);
+          state = { ...state, outputRecoveryCount: state.outputRecoveryCount + 1, transition: { reason: 'output_recovery' } };
+          continue;
+        }
         if (!this.provider.chatStream || !this.bus) {
-          this.bus?.publish({ type: 'text.delta', data: { sessionId: session.id, delta: response.text } });
+          const ev: AgentEvent = { type: 'text.delta', data: { sessionId: session.id, delta: response.text } };
+          this.bus?.publish(ev); yield ev;
         }
         break;
       }
 
-      // ── Execute tools ──
       const preToolDirectiveFiles = this.snapshotDirectiveFiles();
-      const toolResults = await Promise.all(
-        response.toolCalls.map(async (call) => {
-          // Handle delegate tool specially
-          if (call.name === 'delegate') {
-            return this.handleDelegateCall(call, session, toolsUsed);
-          }
-
-          // Hook: before_tool
-          if (this.hooks) {
-            const hookResult = await this.hooks.runBeforeTool(hookCtx, call.name, call.arguments);
-            if (!hookResult.proceed) {
-              return { id: call.id, output: '[Tool blocked by hook]', error: false };
-            }
-            Object.assign(call.arguments, hookResult.args);
-          }
-
-          // Approval gate: sensitive tools require human confirmation
-          if (this.needsApproval(call.name, call.arguments)) {
-            const reason = `Tool "${call.name}" requires approval`;
-            this.bus?.publish({
-              type: 'tool.approval_required',
-              data: { sessionId: session.id, tool: call.name, toolId: call.id, args: call.arguments, reason },
-            });
-            this.observer.recordEvent({ type: 'tool_call_start', timestamp: Date.now(), data: { name: call.name, approval: 'required' } });
-            const approved = await this.waitForApproval(call.id);
-            this.bus?.publish({
-              type: 'tool.approval_response',
-              data: { toolId: call.id, approved, reason: approved ? 'approved' : 'rejected/timeout' },
-            });
-            if (!approved) {
-              return { id: call.id, output: '[Tool blocked: approval denied or timed out]', error: false };
-            }
-          }
-
-          this.observer.recordEvent({
-            type: 'tool_call_start',
-            timestamp: Date.now(),
-            data: { name: call.name, args: call.arguments },
-          });
-          this.bus?.publish({ type: 'tool.start', data: { sessionId: session.id, tool: call.name, toolId: call.id, args: call.arguments } });
-
-          const ctx: ToolContext = {
-            workspaceDir: this.workspaceDir,
-            sessionId: session.id,
-            agentId: this.agentId,
-            emit: (event) => {
-              if (event.type === 'directive') {
-                session.addPendingDirective(event.data as unknown as Directive);
-                this.bus?.publish({ type: 'directive', data: event.data });
-                this.observer.recordEvent({ type: 'directive_emit', timestamp: Date.now(), data: event.data });
-              }
-            },
-          };
-
-          const result = await this.tools.execute(call.name, call.arguments, ctx);
-          toolsUsed.push(call.name);
-
-          this.observer.recordEvent({
-            type: 'tool_call_end',
-            timestamp: Date.now(),
-            data: { name: call.name, success: !result.error, outputLength: result.output.length },
-          });
-          this.bus?.publish({
-            type: 'tool.end',
-            data: { sessionId: session.id, tool: call.name, toolId: call.id, result: (result.output || result.error || '').slice(0, 500) },
-          });
-
-          // Hook: after_tool
-          if (this.hooks) {
-            await this.hooks.runAfterTool(hookCtx, call.name, result.output || result.error || '', !!result.error);
-          }
-
-          return { id: call.id, output: result.error ? `Error: ${result.error}` : result.output, error: !!result.error };
-        })
-      );
-
-      // Scan for directive files written by plugin tools (filesystem fallback)
+      const { results: toolResults, events: toolEvents } = await this.executeToolsPartitioned(response.toolCalls, session, toolsUsed, hookCtx);
+      for (const ev of toolEvents) { this.bus?.publish(ev); yield ev; }
       this.scanDirectiveFiles(session, preToolDirectiveFiles);
 
-      // Append tool results to messages (with compaction)
       for (const r of toolResults) {
-        const content = compactToolResult(r.output);
-        const toolMsg: Message = { role: 'tool', content, toolCallId: r.id };
-        messages.push(toolMsg);
-        session.addMessage(toolMsg);
+        const toolMsg: Message = { role: 'tool', content: compactToolResult(r.output), toolCallId: r.id };
+        state.messages.push(toolMsg); session.addMessage(toolMsg);
       }
+      for (const call of response.toolCalls) { state.recentToolSigs.push(`${call.name}:${JSON.stringify(call.arguments).slice(0, 80)}`); }
 
-      // Track tool call signatures for repetition detection
-      for (const call of response.toolCalls) {
-        recentToolSigs.push(`${call.name}:${JSON.stringify(call.arguments).slice(0, 80)}`);
-      }
-
-      // ── Doom-loop detection (errors) ──
       const errorsThisRound = toolResults.filter(r => r.error).length;
-      if (errorsThisRound === toolResults.length && toolResults.length > 0) {
-        consecutiveErrors++;
-      } else {
-        consecutiveErrors = 0;
-      }
-
-      if (consecutiveErrors >= DOOM_LOOP_THRESHOLD) {
-        this.observer.recordEvent({
-          type: 'doom_loop',
-          timestamp: Date.now(),
-          data: { consecutiveErrors, lastTools: toolResults.map(r => r.id) },
-        });
-        this.bus?.publish({ type: 'error', data: { message: 'Doom loop detected — stopping after 3 consecutive all-tool-error rounds' } });
-        lastText = '[Stopped: repeated tool failures detected. Please try a different approach.]';
+      if (errorsThisRound === toolResults.length && toolResults.length > 0) { state.consecutiveErrors++; } else { state.consecutiveErrors = 0; }
+      if (state.consecutiveErrors >= DOOM_LOOP_THRESHOLD) {
+        this.observer.recordEvent({ type: 'doom_loop', timestamp: Date.now(), data: { consecutiveErrors: state.consecutiveErrors, lastTools: toolResults.map(r => r.id) } });
+        const ev: AgentEvent = { type: 'error', data: { message: 'Doom loop detected — stopping after 3 consecutive all-tool-error rounds' } };
+        this.bus?.publish(ev); yield ev;
+        state.lastText = '[Stopped: repeated tool failures detected. Please try a different approach.]';
         break;
       }
-
-      // ── Doom-loop detection (repetition) ──
-      if (recentToolSigs.length >= REPETITION_THRESHOLD) {
-        const lastN = recentToolSigs.slice(-REPETITION_THRESHOLD);
+      if (state.recentToolSigs.length >= REPETITION_THRESHOLD) {
+        const lastN = state.recentToolSigs.slice(-REPETITION_THRESHOLD);
         if (lastN.every(s => s === lastN[0])) {
-          this.observer.recordEvent({
-            type: 'doom_loop',
-            timestamp: Date.now(),
-            data: { type: 'repetition', signature: lastN[0] },
-          });
-          this.bus?.publish({ type: 'error', data: { message: 'Repetitive tool calls detected — stopping' } });
-          lastText = '[Stopped: repetitive tool calls detected. Please try a different approach.]';
+          this.observer.recordEvent({ type: 'doom_loop', timestamp: Date.now(), data: { type: 'repetition', signature: lastN[0] } });
+          const ev: AgentEvent = { type: 'error', data: { message: 'Repetitive tool calls detected — stopping' } };
+          this.bus?.publish(ev); yield ev;
+          state.lastText = '[Stopped: repetitive tool calls detected. Please try a different approach.]';
           break;
         }
       }
+      state.transition = { reason: 'next_turn' };
     }
 
-    if (iteration > this.maxIterations) {
-      lastText = lastText || '[Max iterations reached]';
-    }
-
-    const result = this.buildResult(lastText, lastThinking, session, toolsUsed, totalUsage, iteration);
-
-    // Hook: agent_end
-    if (this.hooks) {
-      await this.hooks.runAgentEnd(hookCtx, result);
-    }
-
-    this.observer.recordEvent({
-      type: 'agent_end',
-      timestamp: Date.now(),
-      data: { agentId: this.agentId, iterations: iteration, toolsUsed, duration_ms: Date.now() - startMs },
-    });
-    this.bus?.publish({ type: 'agent.end', data: { sessionId: session.id, toolsUsed } });
-
+    if (state.iteration > this.maxIterations) state.lastText = state.lastText || '[Max iterations reached]';
+    const result = this.buildResult(state.lastText, state.lastThinking, session, toolsUsed, state.totalUsage, state.iteration);
+    if (this.hooks) await this.hooks.runAgentEnd(hookCtx, result);
+    this.observer.recordEvent({ type: 'agent_end', timestamp: Date.now(), data: { agentId: this.agentId, iterations: state.iteration, toolsUsed, duration_ms: Date.now() - startMs } });
+    const endEvent: AgentEvent = { type: 'agent.end', data: { sessionId: session.id, toolsUsed } };
+    this.bus?.publish(endEvent); yield endEvent;
     return result;
   }
 
-  /** Delegate to a sub-agent */
-  private async delegateToSubAgent(
-    agentId: string,
-    message: string,
-    parentSession: Session,
-  ): Promise<AgentResult> {
+  /** Delegate to sub-agent with recursion protection + tool filtering + abort propagation */
+  private async *delegateToSubAgent(agentId: string, message: string, parentSession: Session): AsyncGenerator<AgentEvent, AgentResult> {
     const config = this.agents.get(agentId);
-    if (!config || config.mode === 'hidden') {
-      return this.buildResult(
-        `Unknown sub-agent: ${agentId}`,
-        undefined,
-        parentSession,
-        [],
-        { promptTokens: 0, completionTokens: 0 },
-        0,
-      );
-    }
+    if (!config || config.mode === 'hidden') return this.buildResult(`Unknown sub-agent: ${agentId}`, undefined, parentSession, [], { promptTokens: 0, completionTokens: 0 }, 0);
+    if (this.depth >= MAX_SUBAGENT_DEPTH) return this.buildResult(`[Stopped: maximum sub-agent depth (${MAX_SUBAGENT_DEPTH}) reached]`, undefined, parentSession, [], { promptTokens: 0, completionTokens: 0 }, 0);
 
-    this.observer.recordEvent({
-      type: 'subagent_start',
-      timestamp: Date.now(),
-      data: { parentAgent: this.agentId, subAgent: agentId },
-    });
-    this.bus?.publish({ type: 'subagent.start', data: { parentAgent: this.agentId, subAgent: agentId } });
+    this.observer.recordEvent({ type: 'subagent_start', timestamp: Date.now(), data: { parentAgent: this.agentId, subAgent: agentId, depth: this.depth + 1 } });
+    const subStartEvent: AgentEvent = { type: 'subagent.start', data: { parentAgent: this.agentId, subAgent: agentId } };
+    this.bus?.publish(subStartEvent); yield subStartEvent;
 
     const childSession = parentSession.createChild(agentId);
-
-    const subAgent = new PrismerAgent({
-      provider: this.provider,
-      tools: this.tools,
-      observer: this.observer,
-      agents: this.agents,
-      bus: this.bus,
-      systemPrompt: config.systemPrompt,
-      model: config.model ?? this.model,
-      maxIterations: config.maxIterations ?? 20,
-      agentId: config.id,
-      workspaceDir: this.workspaceDir,
-    });
-
-    const result = await subAgent.processMessage(message, childSession);
-
-    // Merge child directives into parent
-    for (const d of result.directives) {
-      parentSession.addPendingDirective(d);
-    }
-
-    this.observer.recordEvent({
-      type: 'subagent_end',
-      timestamp: Date.now(),
-      data: { subAgent: agentId, toolsUsed: result.toolsUsed, iterations: result.iterations },
-    });
-    this.bus?.publish({ type: 'subagent.end', data: { parentAgent: this.agentId, subAgent: agentId } });
-
-    return result;
-  }
-
-  /** Handle the "delegate" tool call */
-  private async handleDelegateCall(
-    call: { id: string; name: string; arguments: Record<string, unknown> },
-    session: Session,
-    toolsUsed: string[],
-  ): Promise<{ id: string; output: string; error: boolean }> {
-    const targetAgent = call.arguments.agent as string;
-    const task = call.arguments.task as string;
-
-    if (!targetAgent || !task) {
-      return { id: call.id, output: 'Error: delegate requires "agent" and "task" arguments', error: true };
-    }
-
-    toolsUsed.push(`delegate:${targetAgent}`);
+    const filteredTools = this.tools.withFilter(name => name !== 'delegate');
+    const childAbort = new AbortController();
+    const onParentAbort = () => childAbort.abort();
+    this.abortSignal?.addEventListener('abort', onParentAbort, { once: true });
 
     try {
-      const result = await this.delegateToSubAgent(targetAgent, task, session);
-      return { id: call.id, output: result.text, error: false };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return { id: call.id, output: `Delegation failed: ${message}`, error: true };
+      const subAgent = new PrismerAgent({
+        provider: this.provider, tools: filteredTools, observer: this.observer, agents: this.agents, bus: this.bus,
+        systemPrompt: config.systemPrompt, model: config.model ?? this.model, maxIterations: config.maxIterations ?? 20,
+        agentId: config.id, workspaceDir: this.workspaceDir, _depth: this.depth + 1, abortSignal: childAbort.signal,
+      });
+      const gen = subAgent.processMessage(message, childSession);
+      let iterResult = await gen.next();
+      while (!iterResult.done) { yield iterResult.value; iterResult = await gen.next(); }
+      const result = iterResult.value;
+      for (const d of result.directives) parentSession.addPendingDirective(d);
+      this.observer.recordEvent({ type: 'subagent_end', timestamp: Date.now(), data: { subAgent: agentId, toolsUsed: result.toolsUsed, iterations: result.iterations } });
+      const subEndEvent: AgentEvent = { type: 'subagent.end', data: { parentAgent: this.agentId, subAgent: agentId } };
+      this.bus?.publish(subEndEvent); yield subEndEvent;
+      return result;
+    } finally {
+      this.abortSignal?.removeEventListener('abort', onParentAbort);
     }
   }
 
-  /** Build the delegate tool spec */
-  private getDelegateToolSpec(): ToolSpec {
-    const delegatable = this.agents.getDelegatableAgents();
-    return {
-      type: 'function',
-      function: {
-        name: 'delegate',
-        description: `Delegate a task to a specialized sub-agent. Available: ${delegatable.join(', ')}`,
-        parameters: {
-          type: 'object',
-          properties: {
-            agent: {
-              type: 'string',
-              enum: delegatable,
-              description: 'The sub-agent to delegate to',
-            },
-            task: {
-              type: 'string',
-              description: 'The task description for the sub-agent',
-            },
-          },
-          required: ['agent', 'task'],
-        },
-      },
-    };
+  private async handleDelegateCall(
+    call: { id: string; name: string; arguments: Record<string, unknown> }, session: Session, toolsUsed: string[],
+  ): Promise<{ result: { id: string; output: string; error: boolean }; events: AgentEvent[] }> {
+    const targetAgent = call.arguments.agent as string;
+    const task = call.arguments.task as string;
+    if (!targetAgent || !task) return { result: { id: call.id, output: 'Error: delegate requires "agent" and "task" arguments', error: true }, events: [] };
+    toolsUsed.push(`delegate:${targetAgent}`);
+    try {
+      const events: AgentEvent[] = [];
+      const gen = this.delegateToSubAgent(targetAgent, task, session);
+      let iterResult = await gen.next();
+      while (!iterResult.done) { events.push(iterResult.value); iterResult = await gen.next(); }
+      return { result: { id: call.id, output: iterResult.value.text, error: false }, events };
+    } catch (err) {
+      return { result: { id: call.id, output: `Delegation failed: ${err instanceof Error ? err.message : String(err)}`, error: true }, events: [] };
+    }
   }
 
-  private buildResult(
-    text: string,
-    thinking: string | undefined,
-    session: Session,
-    toolsUsed: string[],
-    usage: { promptTokens: number; completionTokens: number },
-    iterations: number,
-  ): AgentResult {
-    return {
-      text,
-      thinking,
-      directives: session.drainDirectives(),
-      toolsUsed: [...new Set(toolsUsed)],
-      usage: usage.promptTokens > 0 ? usage : undefined,
-      iterations,
-    };
+  private getDelegateToolSpec(): ToolSpec {
+    const delegatable = this.agents.getDelegatableAgents();
+    return { type: 'function', function: { name: 'delegate', description: `Delegate a task to a specialized sub-agent. Available: ${delegatable.join(', ')}`, parameters: { type: 'object', properties: { agent: { type: 'string', enum: delegatable, description: 'The sub-agent to delegate to' }, task: { type: 'string', description: 'The task description for the sub-agent' } }, required: ['agent', 'task'] } } };
+  }
+
+  private buildResult(text: string, thinking: string | undefined, session: Session, toolsUsed: string[], usage: { promptTokens: number; completionTokens: number }, iterations: number): AgentResult {
+    return { text, thinking, directives: session.drainDirectives(), toolsUsed: [...new Set(toolsUsed)], usage: usage.promptTokens > 0 ? usage : undefined, iterations };
   }
 }

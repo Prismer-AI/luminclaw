@@ -36,6 +36,12 @@ export interface Tool {
   description: string;
   parameters: Record<string, unknown>; // JSON Schema
   execute(args: Record<string, unknown>, ctx: ToolContext): Promise<string>;
+  /**
+   * Return `true` if this tool is safe to run concurrently with other
+   * concurrent-safe tools (i.e., read-only / no side effects for the
+   * given arguments). Defaults to `false` (serial) when not provided.
+   */
+  isConcurrencySafe?(args: Record<string, unknown>): boolean;
 }
 
 // ── Tool Registry ────────────────────────────────────────
@@ -103,6 +109,21 @@ export class ToolRegistry {
       const message = err instanceof Error ? err.message : String(err);
       return { output: '', error: message };
     }
+  }
+
+  /**
+   * Create a filtered view of this registry. The returned registry
+   * shares the same tool implementations but only exposes tools
+   * that pass the predicate.
+   */
+  withFilter(predicate: (name: string) => boolean): ToolRegistry {
+    const filtered = new ToolRegistry();
+    for (const [name, tool] of this.tools) {
+      if (predicate(name)) {
+        filtered.register(tool);
+      }
+    }
+    return filtered;
   }
 
   /** Number of registered tools */

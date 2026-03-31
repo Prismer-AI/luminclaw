@@ -11,6 +11,9 @@
  * | `after_tool` | After tool execution | Observe only |
  * | `agent_end` | After loop completes | Observe only |
  *
+ * All hook executions are protected by a configurable timeout
+ * (default 30 s) to prevent hanging the agent loop.
+ *
  * @module hooks
  */
 
@@ -48,10 +51,27 @@ export interface AgentEndHook {
 
 export type Hook = BeforePromptHook | BeforeToolHook | AfterToolHook | AgentEndHook;
 
+// ── Timeout helper ──────────────────────────────────────
+
+const DEFAULT_HOOK_TIMEOUT_MS = 30_000;
+
+function withTimeout<T>(promise: Promise<T> | T, ms: number, fallback: T): Promise<T> {
+  if (!(promise instanceof Promise)) return Promise.resolve(promise);
+  return Promise.race([
+    promise,
+    new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms)),
+  ]);
+}
+
 // ── HookRegistry ────────────────────────────────────────
 
 export class HookRegistry {
   private hooks: Hook[] = [];
+  private timeoutMs: number;
+
+  constructor(timeoutMs = DEFAULT_HOOK_TIMEOUT_MS) {
+    this.timeoutMs = timeoutMs;
+  }
 
   register(hook: Hook): void {
     this.hooks.push(hook);
@@ -61,7 +81,9 @@ export class HookRegistry {
     let result = prompt;
     for (const h of this.hooks) {
       if (h.type === 'before_prompt') {
-        result = await h.fn(ctx, result);
+        try {
+          result = await withTimeout(h.fn(ctx, result), this.timeoutMs, result);
+        } catch { /* hooks should not break the loop */ }
       }
     }
     return result;
@@ -75,9 +97,15 @@ export class HookRegistry {
     let currentArgs = args;
     for (const h of this.hooks) {
       if (h.type === 'before_tool') {
-        const result = await h.fn(ctx, tool, currentArgs);
-        if (!result.proceed) return { proceed: false, args: currentArgs };
-        if (result.args) currentArgs = result.args;
+        try {
+          const result = await withTimeout(
+            h.fn(ctx, tool, currentArgs),
+            this.timeoutMs,
+            { proceed: true, args: currentArgs },
+          );
+          if (!result.proceed) return { proceed: false, args: currentArgs };
+          if (result.args) currentArgs = result.args;
+        } catch { /* hooks should not break the loop */ }
       }
     }
     return { proceed: true, args: currentArgs };
@@ -86,7 +114,7 @@ export class HookRegistry {
   async runAfterTool(ctx: HookContext, tool: string, result: string, error: boolean): Promise<void> {
     for (const h of this.hooks) {
       if (h.type === 'after_tool') {
-        try { await h.fn(ctx, tool, result, error); } catch { /* hooks should not break the loop */ }
+        try { await withTimeout(h.fn(ctx, tool, result, error), this.timeoutMs, undefined); } catch { /* hooks should not break the loop */ }
       }
     }
   }
@@ -94,7 +122,7 @@ export class HookRegistry {
   async runAgentEnd(ctx: HookContext, result: AgentResult): Promise<void> {
     for (const h of this.hooks) {
       if (h.type === 'agent_end') {
-        try { await h.fn(ctx, result); } catch { /* hooks should not break the loop */ }
+        try { await withTimeout(h.fn(ctx, result), this.timeoutMs, undefined); } catch { /* hooks should not break the loop */ }
       }
     }
   }

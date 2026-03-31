@@ -255,6 +255,9 @@ function handleWebSocket(req: IncomingMessage, socket: import('node:net').Socket
     alive: true,
   };
 
+  // AbortController for cancelling the running agent on disconnect
+  let currentAbort: AbortController | null = null;
+
   let recvBuffer = Buffer.alloc(0);
 
   // Heartbeat
@@ -375,6 +378,9 @@ function handleWebSocket(req: IncomingMessage, socket: import('node:net').Socket
       }
     });
 
+    // Create abort controller for this agent run
+    currentAbort = new AbortController();
+
     // Run agent
     await runAgent(
       {
@@ -385,6 +391,7 @@ function handleWebSocket(req: IncomingMessage, socket: import('node:net').Socket
       },
       {
         bus,
+        abortSignal: currentAbort.signal,
         onResult: (result, sessionId) => {
           wsSend(socket, {
             type: 'chat.final',
@@ -399,14 +406,20 @@ function handleWebSocket(req: IncomingMessage, socket: import('node:net').Socket
         },
       },
     );
+
+    currentAbort = null;
   });
 
   socket.on('close', () => {
     clearInterval(heartbeat);
+    currentAbort?.abort();
+    currentAbort = null;
   });
 
   socket.on('error', () => {
     clearInterval(heartbeat);
+    currentAbort?.abort();
+    currentAbort = null;
   });
 
   // Welcome message

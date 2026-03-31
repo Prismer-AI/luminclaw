@@ -3,7 +3,7 @@
  *
  * When the context window guard truncates messages, this module:
  *   1. Serializes dropped messages into markdown
- *   2. Calls the hidden compaction agent for a concise summary
+ *   2. Calls the hidden compaction agent for a structured summary
  *   3. Returns a {@link CompactionResult} to inject into the session
  *
  * {@link memoryFlushBeforeCompaction} extracts long-term facts from
@@ -27,10 +27,31 @@ export interface CompactionResult {
   summaryChars: number;
 }
 
+// ── Structured Compaction Prompt ─────────────────────────
+
+const STRUCTURED_COMPACT_PROMPT = `You are a conversation summarizer for an AI agent system. Given a conversation excerpt that was truncated from context, produce a structured summary.
+
+CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
+
+Structure your summary with these sections:
+
+1. **Primary Request**: The user's original goal (1-2 sentences)
+2. **Key Files & Code**: File paths discussed with relevant code snippets — preserve exact code, do NOT paraphrase
+3. **Decisions Made**: Technical decisions and their rationale
+4. **Errors & Fixes**: Any errors encountered and how they were resolved
+5. **Current State**: What was last being worked on (precise, with file names)
+6. **Pending Work**: Tasks not yet completed
+
+Rules:
+- Preserve exact code snippets and file paths — these are critical for continuity
+- Keep tool names and their exact outputs when relevant
+- Be concise but complete — this summary replaces the original messages
+- If a section has nothing relevant, skip it entirely`;
+
 // ── Compaction ──────────────────────────────────────────
 
-const COMPACTION_SYSTEM_PROMPT = BUILTIN_AGENTS.find(a => a.id === 'compaction')?.systemPrompt
-  ?? 'Summarize the conversation into key facts, decisions, and action items.';
+const FALLBACK_SYSTEM_PROMPT = BUILTIN_AGENTS.find(a => a.id === 'compaction')?.systemPrompt
+  ?? STRUCTURED_COMPACT_PROMPT;
 
 /**
  * Summarize a batch of dropped messages using the compaction agent.
@@ -45,11 +66,11 @@ export async function compactConversation(
 
   const response = await provider.chat({
     messages: [
-      { role: 'system', content: COMPACTION_SYSTEM_PROMPT },
+      { role: 'system', content: STRUCTURED_COMPACT_PROMPT },
       { role: 'user', content: `Summarize this conversation excerpt:\n\n${serialized}` },
     ],
     model,
-    maxTokens: 2000,
+    maxTokens: 4000,
   });
 
   const summary = response.text.trim();

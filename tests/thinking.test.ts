@@ -11,6 +11,13 @@ import { EventBus } from '../src/sse.js';
 import { Session } from '../src/session.js';
 import type { Provider, ChatRequest, ChatResponse } from '../src/provider.js';
 
+/** Drain an AsyncGenerator, discarding yielded values, and return the final value. */
+async function drainGenerator<T>(gen: AsyncGenerator<unknown, T>): Promise<T> {
+  let r = await gen.next();
+  while (!r.done) r = await gen.next();
+  return r.value;
+}
+
 function createSpyProvider(): { provider: Provider; getLastRequest: () => ChatRequest | null } {
   let lastRequest: ChatRequest | null = null;
   const provider: Provider = {
@@ -46,7 +53,7 @@ describe('Thinking Control', () => {
     const agent = createAgent(provider);
     const session = new Session('think-1');
 
-    await agent.processMessage('/think What is quantum computing?', session);
+    await drainGenerator(agent.processMessage('/think What is quantum computing?', session));
 
     const req = getLastRequest()!;
     expect(req.thinkingLevel).toBe('high');
@@ -60,7 +67,7 @@ describe('Thinking Control', () => {
     const agent = createAgent(provider);
     const session = new Session('think-2');
 
-    await agent.processMessage('/t Explain relativity.', session);
+    await drainGenerator(agent.processMessage('/t Explain relativity.', session));
 
     expect(getLastRequest()!.thinkingLevel).toBe('high');
     const userMsg = getLastRequest()!.messages.find(m => m.role === 'user');
@@ -72,7 +79,7 @@ describe('Thinking Control', () => {
     const agent = createAgent(provider);
     const session = new Session('think-3');
 
-    await agent.processMessage('/nothink Just say hello.', session);
+    await drainGenerator(agent.processMessage('/nothink Just say hello.', session));
 
     expect(getLastRequest()!.thinkingLevel).toBe('off');
     const userMsg = getLastRequest()!.messages.find(m => m.role === 'user');
@@ -84,7 +91,7 @@ describe('Thinking Control', () => {
     const agent = createAgent(provider);
     const session = new Session('think-4');
 
-    await agent.processMessage('Normal question', session);
+    await drainGenerator(agent.processMessage('Normal question', session));
 
     expect(getLastRequest()!.thinkingLevel).toBeUndefined();
   });
@@ -94,15 +101,15 @@ describe('Thinking Control', () => {
     const agent = createAgent(provider);
 
     // First turn: set thinking to high
-    await agent.processMessage('/think First question', new Session('think-5a'));
+    await drainGenerator(agent.processMessage('/think First question', new Session('think-5a')));
     expect(getLastRequest()!.thinkingLevel).toBe('high');
 
     // Second turn: should retain high
-    await agent.processMessage('Second question', new Session('think-5b'));
+    await drainGenerator(agent.processMessage('Second question', new Session('think-5b')));
     expect(getLastRequest()!.thinkingLevel).toBe('high');
 
     // Third turn: turn off
-    await agent.processMessage('/nothink Third question', new Session('think-5c'));
+    await drainGenerator(agent.processMessage('/nothink Third question', new Session('think-5c')));
     expect(getLastRequest()!.thinkingLevel).toBe('off');
   });
 });
