@@ -25,6 +25,7 @@ pub mod loop_factory;
 pub mod artifacts;
 pub mod task;
 pub mod world_model;
+pub mod tokens;
 
 // Re-exports
 pub use config::{LuminConfig, ApprovalConfig, SessionConfig, ServerConfig, EventBusConfig, MemoryConfig, LogConfig, ModulesConfig, PrismerConfig};
@@ -44,3 +45,4 @@ pub use task::{Task, TaskStatus, TaskStore, InMemoryTaskStore, TaskStateMachine}
 pub use channels::ChannelManager;
 pub use workspace::WorkspaceConfig;
 pub use microcompact::{microcompact as run_microcompact, CLEARED_MARKER};
+pub use tokens::{estimate_tokens, estimate_message_tokens};
