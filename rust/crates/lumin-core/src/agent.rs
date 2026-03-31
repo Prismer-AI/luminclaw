@@ -761,7 +761,8 @@ impl PrismerAgent {
                 }
 
                 session.add_message(Message::tool_result(&call.id, &truncated));
-            }
+            } // end for call in batch.calls
+            } // end for batch in batches
 
             // ── Scan for directive files written by plugin tools (filesystem fallback) ──
             self.scan_directive_files(&mut all_directives, &pre_tool_directive_files);
@@ -1356,5 +1357,111 @@ mod tests {
         let mut directives = Vec::new();
         agent.scan_directive_files(&mut directives, &HashSet::new());
         assert!(directives.is_empty());
+    }
+
+    // ══════════════════════════════════════════════════════════
+    //  NEW: partition_tool_calls tests
+    // ══════════════════════════════════════════════════════════
+
+    #[test]
+    fn partitions_safe_and_unsafe_tools() {
+        let mut reg = ToolRegistry::new();
+        // Register a safe tool
+        reg.register(Tool {
+            name: "read_file".into(),
+            description: "read".into(),
+            parameters: serde_json::json!({}),
+            execute: Arc::new(|_, _| Box::pin(async { "ok".into() })),
+            is_concurrency_safe: Some(Arc::new(|_| true)),
+        });
+        // Register an unsafe tool
+        reg.register(Tool {
+            name: "bash".into(),
+            description: "bash".into(),
+            parameters: serde_json::json!({}),
+            execute: Arc::new(|_, _| Box::pin(async { "ok".into() })),
+            is_concurrency_safe: None,
+        });
+
+        let calls = vec![
+            ToolCall { id: "1".into(), name: "read_file".into(), arguments: serde_json::json!({}) },
+            ToolCall { id: "2".into(), name: "read_file".into(), arguments: serde_json::json!({}) },
+            ToolCall { id: "3".into(), name: "bash".into(), arguments: serde_json::json!({}) },
+            ToolCall { id: "4".into(), name: "read_file".into(), arguments: serde_json::json!({}) },
+        ];
+
+        let batches = partition_tool_calls(&calls, &reg);
+        assert_eq!(batches.len(), 3);
+        assert!(batches[0].concurrent);
+        assert_eq!(batches[0].calls.len(), 2); // two read_files grouped
+        assert!(!batches[1].concurrent);
+        assert_eq!(batches[1].calls.len(), 1); // bash alone
+        assert!(batches[2].concurrent);
+        assert_eq!(batches[2].calls.len(), 1); // final read_file
+    }
+
+    #[test]
+    fn partition_all_safe_tools_single_batch() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Tool {
+            name: "read_file".into(),
+            description: "read".into(),
+            parameters: serde_json::json!({}),
+            execute: Arc::new(|_, _| Box::pin(async { "ok".into() })),
+            is_concurrency_safe: Some(Arc::new(|_| true)),
+        });
+
+        let calls = vec![
+            ToolCall { id: "1".into(), name: "read_file".into(), arguments: serde_json::json!({}) },
+            ToolCall { id: "2".into(), name: "read_file".into(), arguments: serde_json::json!({}) },
+            ToolCall { id: "3".into(), name: "read_file".into(), arguments: serde_json::json!({}) },
+        ];
+
+        let batches = partition_tool_calls(&calls, &reg);
+        assert_eq!(batches.len(), 1);
+        assert!(batches[0].concurrent);
+        assert_eq!(batches[0].calls.len(), 3);
+    }
+
+    #[test]
+    fn partition_all_unsafe_tools_separate_batches() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Tool {
+            name: "bash".into(),
+            description: "bash".into(),
+            parameters: serde_json::json!({}),
+            execute: Arc::new(|_, _| Box::pin(async { "ok".into() })),
+            is_concurrency_safe: None,
+        });
+
+        let calls = vec![
+            ToolCall { id: "1".into(), name: "bash".into(), arguments: serde_json::json!({}) },
+            ToolCall { id: "2".into(), name: "bash".into(), arguments: serde_json::json!({}) },
+        ];
+
+        let batches = partition_tool_calls(&calls, &reg);
+        assert_eq!(batches.len(), 2);
+        assert!(!batches[0].concurrent);
+        assert!(!batches[1].concurrent);
+        assert_eq!(batches[0].calls.len(), 1);
+        assert_eq!(batches[1].calls.len(), 1);
+    }
+
+    #[test]
+    fn partition_empty_calls_returns_empty() {
+        let reg = ToolRegistry::new();
+        let batches = partition_tool_calls(&[], &reg);
+        assert!(batches.is_empty());
+    }
+
+    #[test]
+    fn partition_unknown_tool_treated_as_unsafe() {
+        let reg = ToolRegistry::new(); // empty registry
+        let calls = vec![
+            ToolCall { id: "1".into(), name: "unknown".into(), arguments: serde_json::json!({}) },
+        ];
+        let batches = partition_tool_calls(&calls, &reg);
+        assert_eq!(batches.len(), 1);
+        assert!(!batches[0].concurrent);
     }
 }
