@@ -787,6 +787,7 @@ mod tests {
                     tool_calls: vec![],
                     thinking: None,
                     usage: None,
+                    finish_reason: None,
                 });
             }
             let resp = responses[*idx].clone();
@@ -826,6 +827,7 @@ mod tests {
                     format!("Echo: {text}")
                 })
             }),
+            is_concurrency_safe: None,
         });
         tools.register(Tool {
             name: "big_output".into(),
@@ -834,6 +836,7 @@ mod tests {
             execute: Arc::new(|_args, _ctx| {
                 Box::pin(async move { "X".repeat(200_000) })
             }),
+            is_concurrency_safe: None,
         });
         tools
     }
@@ -857,7 +860,7 @@ mod tests {
     #[tokio::test]
     async fn basic_flow_returns_text_when_no_tool_calls() {
         let provider = Arc::new(MockProvider::new(vec![
-            ChatResponse { text: "Hello!".into(), tool_calls: vec![], thinking: None, usage: None },
+            ChatResponse { text: "Hello!".into(), tool_calls: vec![], thinking: None, usage: None, finish_reason: None },
         ]));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-1");
@@ -870,8 +873,8 @@ mod tests {
     #[tokio::test]
     async fn basic_flow_executes_tool_calls_and_returns_text() {
         let provider = Arc::new(MockProvider::new(vec![
-            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-1", "echo", serde_json::json!({"text": "world"}))], thinking: None, usage: None },
-            ChatResponse { text: "Got echo result.".into(), tool_calls: vec![], thinking: None, usage: None },
+            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-1", "echo", serde_json::json!({"text": "world"}))], thinking: None, usage: None, finish_reason: None },
+            ChatResponse { text: "Got echo result.".into(), tool_calls: vec![], thinking: None, usage: None, finish_reason: None },
         ]));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-2");
@@ -884,10 +887,10 @@ mod tests {
     #[tokio::test]
     async fn doom_loop_stops_after_consecutive_errors() {
         let provider = Arc::new(MockProvider::new(vec![
-            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-1", "failing_tool", serde_json::json!({}))], thinking: None, usage: None },
-            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-2", "failing_tool", serde_json::json!({}))], thinking: None, usage: None },
-            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-3", "failing_tool", serde_json::json!({}))], thinking: None, usage: None },
-            ChatResponse { text: "should not reach here".into(), tool_calls: vec![], thinking: None, usage: None },
+            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-1", "failing_tool", serde_json::json!({}))], thinking: None, usage: None, finish_reason: None },
+            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-2", "failing_tool", serde_json::json!({}))], thinking: None, usage: None, finish_reason: None },
+            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-3", "failing_tool", serde_json::json!({}))], thinking: None, usage: None, finish_reason: None },
+            ChatResponse { text: "should not reach here".into(), tool_calls: vec![], thinking: None, usage: None, finish_reason: None },
         ]));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-doom");
@@ -899,9 +902,9 @@ mod tests {
     async fn repetition_detection_stops_identical_calls() {
         let mut responses: Vec<ChatResponse> = Vec::new();
         for i in 0..8 {
-            responses.push(ChatResponse { text: "".into(), tool_calls: vec![make_tool_call(&format!("tc-{i}"), "echo", serde_json::json!({"text": "same"}))], thinking: None, usage: None });
+            responses.push(ChatResponse { text: "".into(), tool_calls: vec![make_tool_call(&format!("tc-{i}"), "echo", serde_json::json!({"text": "same"}))], thinking: None, usage: None, finish_reason: None });
         }
-        responses.push(ChatResponse { text: "should not reach here".into(), tool_calls: vec![], thinking: None, usage: None });
+        responses.push(ChatResponse { text: "should not reach here".into(), tool_calls: vec![], thinking: None, usage: None, finish_reason: None });
         let provider = Arc::new(MockProvider::new(responses));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-repetition");
@@ -912,12 +915,12 @@ mod tests {
     #[tokio::test]
     async fn no_repetition_for_different_tool_calls() {
         let provider = Arc::new(MockProvider::new(vec![
-            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-1", "echo", serde_json::json!({"text": "a"}))], thinking: None, usage: None },
-            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-2", "echo", serde_json::json!({"text": "b"}))], thinking: None, usage: None },
-            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-3", "echo", serde_json::json!({"text": "c"}))], thinking: None, usage: None },
-            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-4", "echo", serde_json::json!({"text": "d"}))], thinking: None, usage: None },
-            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-5", "echo", serde_json::json!({"text": "e"}))], thinking: None, usage: None },
-            ChatResponse { text: "All done.".into(), tool_calls: vec![], thinking: None, usage: None },
+            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-1", "echo", serde_json::json!({"text": "a"}))], thinking: None, usage: None, finish_reason: None },
+            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-2", "echo", serde_json::json!({"text": "b"}))], thinking: None, usage: None, finish_reason: None },
+            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-3", "echo", serde_json::json!({"text": "c"}))], thinking: None, usage: None, finish_reason: None },
+            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-4", "echo", serde_json::json!({"text": "d"}))], thinking: None, usage: None, finish_reason: None },
+            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-5", "echo", serde_json::json!({"text": "e"}))], thinking: None, usage: None, finish_reason: None },
+            ChatResponse { text: "All done.".into(), tool_calls: vec![], thinking: None, usage: None, finish_reason: None },
         ]));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-different");
@@ -937,8 +940,8 @@ mod tests {
     #[tokio::test]
     async fn handles_unknown_tool_gracefully() {
         let provider = Arc::new(MockProvider::new(vec![
-            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-x", "nonexistent_tool", serde_json::json!({}))], thinking: None, usage: None },
-            ChatResponse { text: "Recovered.".into(), tool_calls: vec![], thinking: None, usage: None },
+            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-x", "nonexistent_tool", serde_json::json!({}))], thinking: None, usage: None, finish_reason: None },
+            ChatResponse { text: "Recovered.".into(), tool_calls: vec![], thinking: None, usage: None, finish_reason: None },
         ]));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-unknown-tool");
@@ -950,7 +953,7 @@ mod tests {
     async fn stops_at_max_iterations() {
         let mut responses: Vec<ChatResponse> = Vec::new();
         for i in 0..15 {
-            responses.push(ChatResponse { text: "".into(), tool_calls: vec![make_tool_call(&format!("tc-{i}"), "echo", serde_json::json!({"text": format!("iter-{i}")}))], thinking: None, usage: None });
+            responses.push(ChatResponse { text: "".into(), tool_calls: vec![make_tool_call(&format!("tc-{i}"), "echo", serde_json::json!({"text": format!("iter-{i}")}))], thinking: None, usage: None, finish_reason: None });
         }
         let provider = Arc::new(MockProvider::new(responses));
         let tools = create_tools();
@@ -966,7 +969,7 @@ mod tests {
     #[tokio::test]
     async fn preserves_thinking_in_result() {
         let provider = Arc::new(MockProvider::new(vec![
-            ChatResponse { text: "Answer.".into(), tool_calls: vec![], thinking: Some("I need to think about this...".into()), usage: None },
+            ChatResponse { text: "Answer.".into(), tool_calls: vec![], thinking: Some("I need to think about this...".into()), usage: None, finish_reason: None },
         ]));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-thinking");
@@ -978,8 +981,8 @@ mod tests {
     #[tokio::test]
     async fn stores_reasoning_in_assistant_messages() {
         let provider = Arc::new(MockProvider::new(vec![
-            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-1", "echo", serde_json::json!({"text": "test"}))], thinking: Some("Let me use a tool.".into()), usage: None },
-            ChatResponse { text: "Done.".into(), tool_calls: vec![], thinking: Some("Tool worked.".into()), usage: None },
+            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-1", "echo", serde_json::json!({"text": "test"}))], thinking: Some("Let me use a tool.".into()), usage: None, finish_reason: None },
+            ChatResponse { text: "Done.".into(), tool_calls: vec![], thinking: Some("Tool worked.".into()), usage: None, finish_reason: None },
         ]));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-reasoning-roundtrip");
@@ -992,8 +995,8 @@ mod tests {
     #[tokio::test]
     async fn compacts_oversized_tool_output() {
         let provider = Arc::new(MockProvider::new(vec![
-            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-big", "big_output", serde_json::json!({}))], thinking: None, usage: None },
-            ChatResponse { text: "Processed.".into(), tool_calls: vec![], thinking: None, usage: None },
+            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-big", "big_output", serde_json::json!({}))], thinking: None, usage: None, finish_reason: None },
+            ChatResponse { text: "Processed.".into(), tool_calls: vec![], thinking: None, usage: None, finish_reason: None },
         ]));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-compact");
@@ -1008,8 +1011,8 @@ mod tests {
     #[tokio::test]
     async fn does_not_compact_small_tool_outputs() {
         let provider = Arc::new(MockProvider::new(vec![
-            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-small", "echo", serde_json::json!({"text": "hello"}))], thinking: None, usage: None },
-            ChatResponse { text: "ok".into(), tool_calls: vec![], thinking: None, usage: None },
+            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-small", "echo", serde_json::json!({"text": "hello"}))], thinking: None, usage: None, finish_reason: None },
+            ChatResponse { text: "ok".into(), tool_calls: vec![], thinking: None, usage: None, finish_reason: None },
         ]));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-no-compact");
@@ -1021,8 +1024,8 @@ mod tests {
     #[tokio::test]
     async fn accumulates_token_usage_across_iterations() {
         let provider = Arc::new(MockProvider::new(vec![
-            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-1", "echo", serde_json::json!({"text": "a"}))], thinking: None, usage: Some(Usage { prompt_tokens: 100, completion_tokens: 50 }) },
-            ChatResponse { text: "Done.".into(), tool_calls: vec![], thinking: None, usage: Some(Usage { prompt_tokens: 200, completion_tokens: 80 }) },
+            ChatResponse { text: "".into(), tool_calls: vec![make_tool_call("tc-1", "echo", serde_json::json!({"text": "a"}))], thinking: None, usage: Some(Usage { prompt_tokens: 100, completion_tokens: 50 }), finish_reason: None },
+            ChatResponse { text: "Done.".into(), tool_calls: vec![], thinking: None, usage: Some(Usage { prompt_tokens: 200, completion_tokens: 80 }), finish_reason: None },
         ]));
         let agent = create_agent(provider, None);
         let mut session = Session::new("test-usage");
@@ -1159,7 +1162,7 @@ mod tests {
     #[tokio::test]
     async fn delegate_to_sub_agent_returns_result() {
         let provider = Arc::new(MockProvider::new(vec![
-            ChatResponse { text: "Compiled successfully.".into(), tool_calls: vec![], thinking: None, usage: None },
+            ChatResponse { text: "Compiled successfully.".into(), tool_calls: vec![], thinking: None, usage: None, finish_reason: None },
         ]));
         let mut agents = AgentRegistry::new();
         agents.register(AgentConfig {
@@ -1192,7 +1195,7 @@ mod tests {
     #[tokio::test]
     async fn mention_triggers_delegation() {
         let provider = Arc::new(MockProvider::new(vec![
-            ChatResponse { text: "LaTeX compiled.".into(), tool_calls: vec![], thinking: None, usage: None },
+            ChatResponse { text: "LaTeX compiled.".into(), tool_calls: vec![], thinking: None, usage: None, finish_reason: None },
         ]));
         let mut agents = AgentRegistry::new();
         agents.register(AgentConfig {

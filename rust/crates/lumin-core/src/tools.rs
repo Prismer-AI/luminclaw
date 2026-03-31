@@ -35,6 +35,9 @@ pub struct Tool {
     pub description: String,
     pub parameters: Value,
     pub execute: ToolFn,
+    /// Return true if safe to run concurrently (read-only / no side effects).
+    /// None = assume unsafe (serial). Mirrors TS `isConcurrencySafe`.
+    pub is_concurrency_safe: Option<Arc<dyn Fn(&Value) -> bool + Send + Sync>>,
 }
 
 pub struct ToolRegistry {
@@ -67,6 +70,24 @@ impl ToolRegistry {
             Some(tool) => Ok((tool.execute)(args, ctx).await),
             None => Err(format!("Tool not found: {name}")),
         }
+    }
+
+    /// Create a filtered view of this registry.
+    /// Mirrors TS `ToolRegistry.withFilter`.
+    pub fn with_filter<F: Fn(&str) -> bool>(&self, predicate: F) -> ToolRegistry {
+        let mut filtered = ToolRegistry::new();
+        for (name, tool) in &self.tools {
+            if predicate(name) {
+                filtered.tools.insert(name.clone(), Tool {
+                    name: tool.name.clone(),
+                    description: tool.description.clone(),
+                    parameters: tool.parameters.clone(),
+                    execute: tool.execute.clone(),
+                    is_concurrency_safe: tool.is_concurrency_safe.clone(),
+                });
+            }
+        }
+        filtered
     }
 
     /// Get OpenAI-format tool specs for LLM.
@@ -125,6 +146,7 @@ fn create_test_tool(name: &str, description: &str) -> Tool {
                 format!("echo: {}", args["input"].as_str().unwrap_or(""))
             })
         }),
+        is_concurrency_safe: None,
     }
 }
 
@@ -163,6 +185,7 @@ pub fn create_bash_tool(workspace_dir: String) -> Tool {
                 }
             })
         }),
+        is_concurrency_safe: None,
     }
 }
 
@@ -422,6 +445,7 @@ mod tests {
                     format!("ws={} sess={} agent={}", ctx.workspace_dir, ctx.session_id, ctx.agent_id)
                 })
             }),
+            is_concurrency_safe: None,
         };
         reg.register(tool);
 
@@ -470,6 +494,7 @@ mod tests {
             execute: Arc::new(|_args, _ctx| {
                 Box::pin(async { "ok".to_string() })
             }),
+            is_concurrency_safe: None,
         };
         let mut reg = ToolRegistry::new();
         reg.register(tool);
@@ -494,6 +519,7 @@ mod tests {
             execute: Arc::new(|_args, _ctx| {
                 Box::pin(async { "version-1".to_string() })
             }),
+            is_concurrency_safe: None,
         };
         reg.register(tool_v1);
 
@@ -505,6 +531,7 @@ mod tests {
             execute: Arc::new(|_args, _ctx| {
                 Box::pin(async { "version-2".to_string() })
             }),
+            is_concurrency_safe: None,
         };
         reg.register(tool_v2);
 
@@ -602,5 +629,26 @@ mod tests {
         let allowed = vec!["foo".to_string(), "bar".to_string()];
         let specs = reg.get_specs_filtered(&allowed);
         assert!(specs.is_empty());
+    }
+
+    #[test]
+    fn with_filter_excludes_tools() {
+        let mut reg = ToolRegistry::new();
+        reg.register(create_test_tool("bash", "run commands"));
+        reg.register(create_test_tool("read", "read files"));
+        reg.register(create_test_tool("delegate", "delegate"));
+        let filtered = reg.with_filter(|name| name != "delegate");
+        assert_eq!(filtered.size(), 2);
+        assert!(filtered.has("bash"));
+        assert!(filtered.has("read"));
+        assert!(!filtered.has("delegate"));
+    }
+
+    #[test]
+    fn with_filter_empty_keeps_none() {
+        let mut reg = ToolRegistry::new();
+        reg.register(create_test_tool("bash", "run commands"));
+        let filtered = reg.with_filter(|_| false);
+        assert_eq!(filtered.size(), 0);
     }
 }

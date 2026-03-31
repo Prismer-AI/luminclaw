@@ -206,6 +206,7 @@ pub async fn chat(
                     }
                 })
             }),
+            is_concurrency_safe: None,
         });
     }
     {
@@ -231,6 +232,7 @@ pub async fn chat(
                     }
                 })
             }),
+            is_concurrency_safe: None,
         });
     }
 
@@ -334,6 +336,7 @@ pub async fn list_tools(
         execute: std::sync::Arc::new(move |_args, _ctx| {
             Box::pin(async move { String::new() })
         }),
+        is_concurrency_safe: None,
     });
     let wd2 = state.config.workspace.dir.clone();
     tools.register(Tool {
@@ -349,6 +352,7 @@ pub async fn list_tools(
         execute: std::sync::Arc::new(move |_args, _ctx| {
             Box::pin(async move { String::new() })
         }),
+        is_concurrency_safe: None,
     });
 
     let specs = tools.get_specs();
