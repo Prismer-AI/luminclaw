@@ -17,6 +17,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 use tracing::{info, warn, error};
 
+const MAX_OUTPUT_RECOVERY: u32 = 3;
+const MAX_SUBAGENT_DEPTH: u32 = 5;
+
 // ── Result ────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -70,6 +73,36 @@ impl Default for AgentOptions {
     }
 }
 
+// ── Tool partitioning (TS parity: partitionToolCalls) ─────
+
+struct ToolBatch {
+    concurrent: bool,
+    calls: Vec<ToolCall>,
+}
+
+/// Partition tool calls into batches based on concurrency safety.
+/// Consecutive concurrency-safe tools are grouped into a single concurrent batch;
+/// unsafe tools each form a serial (non-concurrent) batch.
+/// Mirrors the TypeScript `partitionToolCalls()` function.
+fn partition_tool_calls(calls: &[ToolCall], tools: &ToolRegistry) -> Vec<ToolBatch> {
+    let mut batches: Vec<ToolBatch> = Vec::new();
+    for call in calls {
+        let tool = tools.get(&call.name);
+        let safe = tool
+            .and_then(|t| t.is_concurrency_safe.as_ref())
+            .map_or(false, |f| f(&call.arguments));
+        match batches.last_mut() {
+            Some(batch) if safe && batch.concurrent => {
+                batch.calls.push(call.clone());
+            }
+            _ => {
+                batches.push(ToolBatch { concurrent: safe, calls: vec![call.clone()] });
+            }
+        }
+    }
+    batches
+}
+
 // ── Agent ─────────────────────────────────────────────────
 
 pub struct PrismerAgent {
@@ -87,6 +120,8 @@ pub struct PrismerAgent {
     bash_patterns: Vec<Regex>,
     /// Pending approval resolvers — keyed by toolId, resolved by external approval response.
     approval_resolvers: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>,
+    /// Sub-agent recursion depth (0 = top-level agent).
+    depth: u32,
 }
 
 impl PrismerAgent {
@@ -106,6 +141,7 @@ impl PrismerAgent {
             system_prompt, model, agent_id, workspace_dir,
             bash_patterns,
             approval_resolvers: Arc::new(Mutex::new(HashMap::new())),
+            depth: 0,
             opts,
         }
     }
@@ -122,6 +158,11 @@ impl PrismerAgent {
 
     pub fn with_agents(mut self, agents: Arc<AgentRegistry>) -> Self {
         self.agents = Some(agents); self
+    }
+
+    pub fn with_depth(mut self, depth: u32) -> Self {
+        self.depth = depth;
+        self
     }
 
     // ── Approval gates (TS parity: lines 165-202, 438-454) ──
@@ -250,6 +291,10 @@ impl PrismerAgent {
         parent_session: &'a Session,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<AgentResult, String>> + Send + 'a>> {
         Box::pin(async move {
+        if self.depth >= MAX_SUBAGENT_DEPTH {
+            return Err(format!("Maximum sub-agent depth ({MAX_SUBAGENT_DEPTH}) reached"));
+        }
+
         let agents = self.agents.as_ref().ok_or("No agent registry available")?;
         let config = agents.get(agent_id)
             .ok_or_else(|| format!("Unknown sub-agent: {agent_id}"))?;
@@ -276,7 +321,7 @@ impl PrismerAgent {
         ).with_options(AgentOptions {
             max_iterations: config.max_iterations.unwrap_or(20),
             ..AgentOptions::default()
-        });
+        }).with_depth(self.depth + 1);
 
         // If agents registry exists, pass it to sub-agent too
         let sub_agent = if let Some(ref agents) = self.agents {
@@ -425,6 +470,7 @@ impl PrismerAgent {
         }
 
         let mut actual_iterations = 0u32;
+        let mut output_recovery_count = 0u32;
 
         for iteration in 1..=self.opts.max_iterations {
             actual_iterations = iteration;
@@ -448,6 +494,9 @@ impl PrismerAgent {
 
             // ── Build messages from session (user input already in session.messages) ──
             let mut messages = session.build_messages_with_memory(&self.system_prompt, memory_context);
+
+            // ── Microcompact: clear old tool results (zero LLM cost) ──
+            crate::microcompact::microcompact(&mut messages, 5);
 
             let total_chars: usize = messages.iter()
                 .map(|m| m.content.as_ref().map_or(0, |c| c.char_len()))
@@ -504,6 +553,13 @@ impl PrismerAgent {
 
             // ── No tool calls -> final response ──
             if response.tool_calls.is_empty() {
+                // Output recovery: if LLM was cut off, ask it to continue
+                if response.finish_reason.as_deref() == Some("length") && output_recovery_count < MAX_OUTPUT_RECOVERY {
+                    let cont_msg = Message::user("Please continue from where you left off.");
+                    session.add_message(cont_msg);
+                    output_recovery_count += 1;
+                    continue;  // Re-enter the loop for another LLM call
+                }
                 session.add_message(Message::assistant(&response.text));
                 self.bus.publish(AgentEvent {
                     event_type: "text.delta".into(),
@@ -521,11 +577,24 @@ impl PrismerAgent {
             }).collect();
             session.add_message(Message::assistant_with_tools(tc_json, response.thinking.clone()));
 
-            // ── Execute tools ──
+            // ── Execute tools (partitioned by concurrency safety) ──
             let pre_tool_directive_files = self.snapshot_directive_files();
             let mut all_errors = true;
+            let batches = partition_tool_calls(&response.tool_calls, &self.tools);
 
-            for call in &response.tool_calls {
+            for batch in &batches {
+                // Both concurrent and serial batches execute tools sequentially for now.
+                // The partitioning structure is in place for future parallelization of
+                // concurrent batches (requires refactoring mutable session/directive access).
+                if batch.concurrent && batch.calls.len() > 1 {
+                    info!(
+                        batch_size = batch.calls.len(),
+                        tools = ?batch.calls.iter().map(|c| &c.name).collect::<Vec<_>>(),
+                        "executing concurrent-safe tool batch (serial for now)"
+                    );
+                }
+
+            for call in &batch.calls {
                 // Handle delegate tool specially
                 if call.name == "delegate" {
                     let (output, is_error) = self.handle_delegate_call(call, session, &mut tools_used).await;
