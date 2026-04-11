@@ -195,6 +195,18 @@ async function ensureInitialized(enabledModules?: string[]): Promise<{ tools: To
   return { tools: sharedTools, agents: sharedAgents };
 }
 
+/**
+ * Return the full set of registered tool specs from the shared registry.
+ *
+ * Used by the `/v1/tools` HTTP endpoint in server.ts so it doesn't have to
+ * duplicate the tool-registration logic that lives in {@link ensureInitialized}.
+ */
+export async function getToolSpecs(enabledModules?: string[]): Promise<{ specs: ReturnType<ToolRegistry['getSpecs']>; count: number }> {
+  const { tools } = await ensureInitialized(enabledModules);
+  const specs = tools.getSpecs();
+  return { specs, count: specs.length };
+}
+
 // ── Dynamic System Prompt ────────────────────────────────
 
 /**

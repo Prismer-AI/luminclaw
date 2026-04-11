@@ -213,21 +213,11 @@ async function handleHealth(_req: IncomingMessage, res: ServerResponse): Promise
 }
 
 async function handleTools(_req: IncomingMessage, res: ServerResponse): Promise<void> {
-  // Lazy import to get the shared tools registry
-  const { ToolRegistry } = await import('./tools.js');
-  const { loadWorkspaceToolsFromPlugin, createTool } = await import('./tools/index.js');
-
-  const tools = new ToolRegistry();
+  const { getToolSpecs } = await import('./index.js');
   const cfg = loadConfig();
   const enabledModules = cfg.modules.enabled.length > 0 ? cfg.modules.enabled : undefined;
-  const { tools: workspaceTools } = await loadWorkspaceToolsFromPlugin(cfg.workspace.pluginPath, enabledModules);
-  tools.registerMany(workspaceTools);
-
-  // Include bash
-  tools.register(createTool('bash', 'Execute bash command', { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] }, async () => ''));
-
-  const specs = tools.getSpecs();
-  json(res, 200, { tools: specs, count: specs.length });
+  const { specs, count } = await getToolSpecs(enabledModules);
+  json(res, 200, { tools: specs, count });
 }
 
 async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<void> {
