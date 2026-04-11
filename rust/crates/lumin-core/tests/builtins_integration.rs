@@ -1,6 +1,7 @@
 //! Integration tests for built-in tools — verifies Rust matches TS behavior.
 
 use lumin_core::tools::builtins::*;
+use lumin_core::tools::memory_tools::*;
 use lumin_core::tools::{ToolContext, ToolRegistry};
 use tempfile::TempDir;
 
@@ -141,12 +142,163 @@ async fn think_returns_recorded() {
 // ── web_fetch (network required) ──
 
 #[tokio::test]
+#[ignore]
 async fn web_fetch_gets_httpbin_json() {
     let tool = create_web_fetch_tool();
     let ctx = make_ctx("/tmp");
     let result = (tool.execute)(serde_json::json!({"url": "https://httpbin.org/json"}), &ctx).await;
     assert!(result.contains("HTTP 200"), "got: {result}");
     assert!(result.contains("slideshow"), "got: {result}");
+}
+
+// ── edit_file replace_all (G1) ──
+
+#[tokio::test]
+async fn edit_file_replace_all_replaces_all_occurrences() {
+    let tmp = TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("multi.txt"), "foo bar foo baz foo").unwrap();
+    let tool = create_edit_file_tool(tmp.path().to_string_lossy().to_string());
+    let ctx = make_ctx(&tmp.path().to_string_lossy());
+    let result = (tool.execute)(
+        serde_json::json!({
+            "path": "multi.txt",
+            "old_string": "foo",
+            "new_string": "qux",
+            "replace_all": true
+        }),
+        &ctx,
+    ).await;
+    assert!(result.contains("Replaced 3"));
+    let content = std::fs::read_to_string(tmp.path().join("multi.txt")).unwrap();
+    assert_eq!(content, "qux bar qux baz qux");
+}
+
+// ── edit_file not found (G8) ──
+
+#[tokio::test]
+async fn edit_file_returns_error_when_old_string_not_found() {
+    let tmp = TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("nope.txt"), "hello world").unwrap();
+    let tool = create_edit_file_tool(tmp.path().to_string_lossy().to_string());
+    let ctx = make_ctx(&tmp.path().to_string_lossy());
+    let result = (tool.execute)(
+        serde_json::json!({"path": "nope.txt", "old_string": "xyz", "new_string": "abc"}),
+        &ctx,
+    ).await;
+    assert!(result.contains("Error: old_string not found"));
+}
+
+// ── list_files glob (G2) ──
+
+#[tokio::test]
+async fn list_files_filters_by_glob_pattern() {
+    let tmp = TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("main.rs"), "").unwrap();
+    std::fs::write(tmp.path().join("lib.rs"), "").unwrap();
+    std::fs::write(tmp.path().join("readme.md"), "").unwrap();
+    let tool = create_list_files_tool(tmp.path().to_string_lossy().to_string());
+    let ctx = make_ctx(&tmp.path().to_string_lossy());
+    let result = (tool.execute)(serde_json::json!({"pattern": "*.rs"}), &ctx).await;
+    assert!(result.contains("main.rs"));
+    assert!(result.contains("lib.rs"));
+    assert!(!result.contains("readme.md"));
+}
+
+// ── grep glob (G3) ──
+
+#[tokio::test]
+async fn grep_filters_by_glob() {
+    let tmp = TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("code.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(tmp.path().join("notes.md"), "fn is a keyword\n").unwrap();
+    let tool = create_grep_tool(tmp.path().to_string_lossy().to_string());
+    let ctx = make_ctx(&tmp.path().to_string_lossy());
+    let result = (tool.execute)(serde_json::json!({"pattern": "fn", "glob": "*.rs"}), &ctx).await;
+    assert!(result.contains("code.rs"));
+    assert!(!result.contains("notes.md"));
+}
+
+// ── grep invalid regex (G9) ──
+
+#[tokio::test]
+async fn grep_returns_error_for_invalid_regex() {
+    let tmp = TempDir::new().unwrap();
+    let tool = create_grep_tool(tmp.path().to_string_lossy().to_string());
+    let ctx = make_ctx(&tmp.path().to_string_lossy());
+    let result = (tool.execute)(serde_json::json!({"pattern": "[invalid"}), &ctx).await;
+    assert!(result.contains("Error: invalid regex"));
+}
+
+// ── write_file path traversal (G4) ──
+
+#[tokio::test]
+async fn write_file_rejects_path_traversal() {
+    let tmp = TempDir::new().unwrap();
+    let tool = create_write_file_tool(tmp.path().to_string_lossy().to_string());
+    let ctx = make_ctx(&tmp.path().to_string_lossy());
+    let result = (tool.execute)(
+        serde_json::json!({"path": "../../etc/evil.txt", "content": "hack"}),
+        &ctx,
+    ).await;
+    assert!(result.contains("traversal"));
+}
+
+// ── read_file missing file (G7) ──
+
+#[tokio::test]
+async fn read_file_returns_error_for_missing_file() {
+    let tmp = TempDir::new().unwrap();
+    let tool = create_read_file_tool(tmp.path().to_string_lossy().to_string());
+    let ctx = make_ctx(&tmp.path().to_string_lossy());
+    let result = (tool.execute)(serde_json::json!({"path": "nonexistent.txt"}), &ctx).await;
+    assert!(result.starts_with("Error:"));
+}
+
+// ── memory roundtrip (G6) ──
+
+#[tokio::test]
+async fn memory_store_and_recall_roundtrip() {
+    let tmp = TempDir::new().unwrap();
+    let ws = tmp.path().to_string_lossy().to_string();
+    let ctx = make_ctx(&ws);
+
+    let store_tool = create_memory_store_tool(ws.clone());
+    let result = (store_tool.execute)(
+        serde_json::json!({"content": "The project uses Rust and TypeScript", "tags": ["tech"]}),
+        &ctx,
+    ).await;
+    assert_eq!(result, "Memory stored successfully.");
+
+    let recall_tool = create_memory_recall_tool(ws);
+    let result = (recall_tool.execute)(
+        serde_json::json!({"query": "Rust TypeScript"}),
+        &ctx,
+    ).await;
+    assert!(result.contains("Rust") || result.contains("TypeScript"),
+        "recall should find stored content, got: {result}");
+}
+
+#[tokio::test]
+async fn memory_recall_returns_not_found_for_empty_store() {
+    let tmp = TempDir::new().unwrap();
+    let ws = tmp.path().to_string_lossy().to_string();
+    let ctx = make_ctx(&ws);
+    let tool = create_memory_recall_tool(ws);
+    let result = (tool.execute)(serde_json::json!({"query": "nothing here"}), &ctx).await;
+    assert_eq!(result, "No matching memories found.");
+}
+
+// ── web_fetch error handling (G5/G12) ──
+
+#[tokio::test]
+async fn web_fetch_returns_error_for_unreachable_url() {
+    let tool = create_web_fetch_tool();
+    let ctx = make_ctx("/tmp");
+    let result = (tool.execute)(
+        serde_json::json!({"url": "http://127.0.0.1:1/unreachable"}),
+        &ctx,
+    ).await;
+    assert!(result.starts_with("Error:"));
 }
 
 // ── register_all_builtins ──
