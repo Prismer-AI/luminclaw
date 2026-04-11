@@ -1,5 +1,7 @@
 //! Tool registry — mirrors TypeScript `tools.ts`.
 
+pub mod builtins;
+
 use serde_json::Value;
 use std::collections::HashMap;
 use std::future::Future;
