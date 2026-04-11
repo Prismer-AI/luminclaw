@@ -184,28 +184,35 @@ fn create_test_tool(name: &str, description: &str) -> Tool {
 }
 
 /// Create a bash tool (container-sandboxed).
+/// Mirrors TS `index.ts:110-139`.
 pub fn create_bash_tool(workspace_dir: String) -> Tool {
     let dir = workspace_dir.clone();
     Tool {
         name: "bash".into(),
-        description: "Execute a bash command".into(),
+        description: "Execute a bash command in the container. Use for file operations, package installation, and system commands.".into(),
         parameters: serde_json::json!({
             "type": "object",
-            "properties": { "command": { "type": "string" } },
+            "properties": {
+                "command": { "type": "string", "description": "The bash command to execute" },
+                "timeout": { "type": "number", "description": "Timeout in ms (default: 30000)" }
+            },
             "required": ["command"]
         }),
         execute: Arc::new(move |args, _ctx| {
             let dir = dir.clone();
             Box::pin(async move {
                 let cmd = args["command"].as_str().unwrap_or("");
-                match tokio::process::Command::new("/bin/sh")
-                    .arg("-c")
-                    .arg(cmd)
-                    .current_dir(&dir)
-                    .output()
-                    .await
-                {
-                    Ok(output) => {
+                let timeout_ms = args["timeout"].as_u64().unwrap_or(30_000);
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_millis(timeout_ms),
+                    tokio::process::Command::new("/bin/sh")
+                        .arg("-c")
+                        .arg(cmd)
+                        .current_dir(&dir)
+                        .output(),
+                ).await;
+                match result {
+                    Ok(Ok(output)) => {
                         let stdout = String::from_utf8_lossy(&output.stdout);
                         let stderr = String::from_utf8_lossy(&output.stderr);
                         if output.status.success() {
@@ -214,7 +221,8 @@ pub fn create_bash_tool(workspace_dir: String) -> Tool {
                             format!("Error: {}", &stderr[..stderr.len().min(5_000)])
                         }
                     }
-                    Err(e) => format!("Error: {e}"),
+                    Ok(Err(e)) => format!("Error: {e}"),
+                    Err(_) => format!("Error: command timed out after {timeout_ms}ms"),
                 }
             })
         }),
@@ -343,8 +351,9 @@ mod tests {
     fn create_bash_tool_exists_and_has_correct_name() {
         let tool = create_bash_tool("/tmp".into());
         assert_eq!(tool.name, "bash");
-        assert_eq!(tool.description, "Execute a bash command");
+        assert!(tool.description.contains("bash command"));
         assert!(tool.parameters["properties"]["command"].is_object());
+        assert!(tool.parameters["properties"]["timeout"].is_object());
     }
 
     #[test]

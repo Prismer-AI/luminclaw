@@ -7,7 +7,7 @@ use lumin_core::tools::ToolRegistry;
 /// Canonical tool spec — must match the TS test's CANONICAL object exactly.
 const EXPECTED: &[(&str, &[&str], &[&str])] = &[
     // (name, required, properties)
-    ("bash",          &["command"],                             &["command"]),
+    ("bash",          &["command"],                             &["command", "timeout"]),
     ("read_file",     &["path"],                                &["path", "offset", "limit"]),
     ("write_file",    &["path", "content"],                     &["path", "content"]),
     ("edit_file",     &["path", "old_string", "new_string"],    &["path", "old_string", "new_string", "replace_all"]),
