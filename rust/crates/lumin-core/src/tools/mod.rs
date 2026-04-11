@@ -1,6 +1,7 @@
 //! Tool registry — mirrors TypeScript `tools.ts`.
 
 pub mod builtins;
+pub mod memory_tools;
 
 use serde_json::Value;
 use std::collections::HashMap;

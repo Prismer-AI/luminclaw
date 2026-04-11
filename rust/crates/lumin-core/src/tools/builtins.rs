@@ -425,3 +425,19 @@ pub fn create_think_tool() -> Tool {
         is_concurrency_safe: Some(Arc::new(|_| true)),
     }
 }
+
+/// Register all built-in tools: 7 builtins + bash + memory_store + memory_recall.
+/// Single entry point used by both CLI and server — mirrors TS `ensureInitialized()` in `index.ts:62-196`.
+pub fn register_all_builtins(registry: &mut super::ToolRegistry, workspace_dir: &str) {
+    let wd = workspace_dir.to_string();
+    registry.register(super::create_bash_tool(wd.clone()));
+    registry.register(create_read_file_tool(wd.clone()));
+    registry.register(create_write_file_tool(wd.clone()));
+    registry.register(create_edit_file_tool(wd.clone()));
+    registry.register(create_list_files_tool(wd.clone()));
+    registry.register(create_grep_tool(wd.clone()));
+    registry.register(create_web_fetch_tool());
+    registry.register(create_think_tool());
+    registry.register(super::memory_tools::create_memory_store_tool(wd.clone()));
+    registry.register(super::memory_tools::create_memory_recall_tool(wd));
+}
