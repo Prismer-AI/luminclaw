@@ -66,7 +66,7 @@ async fn main() {
                 &config.llm.base_url, &config.llm.api_key, &config.llm.model,
             );
             let mut tools = lumin_core::ToolRegistry::new();
-            tools.register(lumin_core::tools::create_bash_tool(config.workspace.dir.clone()));
+            lumin_core::tools::builtins::register_all_builtins(&mut tools, &config.workspace.dir);
             let bus = lumin_core::sse::EventBus::default();
             let mut session = lumin_core::Session::new("cli-session");
 

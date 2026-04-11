@@ -7,8 +7,7 @@ use axum::{
 };
 use lumin_core::provider::{OpenAIProvider, FallbackProvider, Provider};
 use lumin_core::task::TaskStore;
-use lumin_core::{PrismerAgent, AgentOptions, ToolRegistry, PromptBuilder, MemoryStore, Tool};
-use lumin_core::tools::create_bash_tool;
+use lumin_core::{PrismerAgent, AgentOptions, ToolRegistry, PromptBuilder};
 use lumin_core::sse::EventBus;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -137,7 +136,7 @@ pub async fn chat(
         tokio::spawn(async move {
             let provider = OpenAIProvider::new(&config.llm.base_url, &config.llm.api_key, &config.llm.model);
             let mut tools = ToolRegistry::new();
-            tools.register(create_bash_tool(config.workspace.dir.clone()));
+            lumin_core::tools::builtins::register_all_builtins(&mut tools, &config.workspace.dir);
             let bus = Arc::new(EventBus::default());
             let mut pb = PromptBuilder::new(&config.workspace.dir);
             pb.load_identity();
@@ -175,66 +174,9 @@ pub async fn chat(
         Arc::new(FallbackProvider::new(base_provider, fallbacks))
     };
 
-    // Set up tools (bash + memory_store + memory_recall — matching TS)
+    // Set up tools (all builtins — matching TS)
     let mut tools = ToolRegistry::new();
-    tools.register(create_bash_tool(state.config.workspace.dir.clone()));
-    let workspace_dir = state.config.workspace.dir.clone();
-    {
-        let wd = workspace_dir.clone();
-        tools.register(Tool {
-            name: "memory_store".into(),
-            description: "Store a memory entry for later recall.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "content": { "type": "string", "description": "The memory content to store" },
-                    "tags": { "type": "array", "items": { "type": "string" }, "description": "Optional tags" }
-                },
-                "required": ["content"]
-            }),
-            execute: std::sync::Arc::new(move |args, _ctx| {
-                let wd = wd.clone();
-                Box::pin(async move {
-                    let mem = MemoryStore::new(&wd);
-                    let content = args["content"].as_str().unwrap_or("");
-                    let tags: Vec<&str> = args["tags"].as_array()
-                        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
-                        .unwrap_or_default();
-                    match mem.store(content, &tags) {
-                        Ok(_) => "Memory stored successfully.".into(),
-                        Err(e) => format!("Error: {e}"),
-                    }
-                })
-            }),
-            is_concurrency_safe: None,
-        });
-    }
-    {
-        let wd = workspace_dir.clone();
-        tools.register(Tool {
-            name: "memory_recall".into(),
-            description: "Search stored memories by keywords.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "Keywords to search for" }
-                },
-                "required": ["query"]
-            }),
-            execute: std::sync::Arc::new(move |args, _ctx| {
-                let wd = wd.clone();
-                Box::pin(async move {
-                    let mem = MemoryStore::new(&wd);
-                    let query = args["query"].as_str().unwrap_or("");
-                    match mem.recall(query, 4000) {
-                        Some(result) => result,
-                        None => "No matching memories found.".into(),
-                    }
-                })
-            }),
-            is_concurrency_safe: None,
-        });
-    }
+    lumin_core::tools::builtins::register_all_builtins(&mut tools, &state.config.workspace.dir);
 
     // Set up EventBus
     let bus = Arc::new(EventBus::default());
@@ -318,43 +260,7 @@ pub async fn list_tools(
     State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
     let mut tools = ToolRegistry::new();
-    tools.register(create_bash_tool(state.config.workspace.dir.clone()));
-
-    // memory_store + memory_recall
-    let wd = state.config.workspace.dir.clone();
-    tools.register(Tool {
-        name: "memory_store".into(),
-        description: "Store a memory entry for later recall.".into(),
-        parameters: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "content": { "type": "string", "description": "The memory content to store" },
-                "tags": { "type": "array", "items": { "type": "string" }, "description": "Optional tags" }
-            },
-            "required": ["content"]
-        }),
-        execute: std::sync::Arc::new(move |_args, _ctx| {
-            Box::pin(async move { String::new() })
-        }),
-        is_concurrency_safe: None,
-    });
-    let wd2 = state.config.workspace.dir.clone();
-    tools.register(Tool {
-        name: "memory_recall".into(),
-        description: "Search stored memories by keywords.".into(),
-        parameters: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "query": { "type": "string", "description": "Keywords to search for" }
-            },
-            "required": ["query"]
-        }),
-        execute: std::sync::Arc::new(move |_args, _ctx| {
-            Box::pin(async move { String::new() })
-        }),
-        is_concurrency_safe: None,
-    });
-
+    lumin_core::tools::builtins::register_all_builtins(&mut tools, &state.config.workspace.dir);
     let specs = tools.get_specs();
     Json(serde_json::json!({ "tools": specs, "count": specs.len() }))
 }
