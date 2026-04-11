@@ -9,11 +9,11 @@ use axum::{
 use lumin_core::provider::OpenAIProvider;
 use lumin_core::{PrismerAgent, AgentOptions, ToolRegistry, Session, PromptBuilder};
 use lumin_core::tools::create_bash_tool;
-use lumin_core::sse::{EventBus, AgentEvent};
+use lumin_core::sse::EventBus;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{error, warn};
+use tracing::error;
 
 use super::AppState;
 

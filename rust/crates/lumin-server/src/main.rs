@@ -10,11 +10,9 @@
 use axum::{
     Router,
     routing::{get, post},
-    extract::State,
-    response::Json,
 };
 use clap::Parser;
-use lumin_core::{LuminConfig, create_agent_loop, resolve_loop_mode, LoopMode};
+use lumin_core::{LuminConfig, resolve_loop_mode, LoopMode};
 use std::sync::Arc;
 use tracing::info;
 

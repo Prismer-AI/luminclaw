@@ -6,7 +6,7 @@
 use crate::loop_types::*;
 use crate::artifacts::{Artifact, ArtifactStore, InMemoryArtifactStore};
 use crate::task::{Task, TaskStatus, TaskStateMachine, InMemoryTaskStore, TaskStore};
-use crate::world_model::{WorldModel, AgentCompletionRecord};
+use crate::world_model::WorldModel;
 use crate::agent::{PrismerAgent, AgentOptions};
 use crate::provider::OpenAIProvider;
 use crate::tools::{ToolRegistry, create_bash_tool};
@@ -15,7 +15,7 @@ use crate::prompt::PromptBuilder;
 use crate::config::LuminConfig;
 use crate::sse::{EventBus, AgentEvent};
 use std::sync::{Arc, Mutex};
-use tracing::{info, warn, error};
+use tracing::{info, error};
 
 pub struct DualLoopAgent {
     pub artifacts: InMemoryArtifactStore,
@@ -243,7 +243,7 @@ async fn run_inner_loop(
     config: &LuminConfig,
     content: &str,
     session_id: &str,
-    task_id: &str,
+    _task_id: &str,
     world_model: Option<WorldModel>,
     cancelled: &Arc<Mutex<bool>>,
     bus: &EventBus,
@@ -535,7 +535,7 @@ mod tests {
             added_at: 0,
         });
 
-        let result = agent.process_message(
+        let _result = agent.process_message(
             AgentLoopInput {
                 content: "Analyze this image".into(),
                 session_id: None,

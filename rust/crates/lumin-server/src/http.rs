@@ -270,6 +270,7 @@ pub async fn list_tools(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArtifactRequest {
+    #[allow(dead_code)]
     pub url: String,
     #[serde(alias = "mime_type")]
     pub mime_type: String,

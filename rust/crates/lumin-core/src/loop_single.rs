@@ -6,7 +6,7 @@ use crate::artifacts::{Artifact, ArtifactStore, InMemoryArtifactStore};
 use crate::agent::{PrismerAgent, AgentOptions};
 use crate::provider::OpenAIProvider;
 use crate::tools::{ToolRegistry, create_bash_tool};
-use crate::session::{Session, SessionStore};
+use crate::session::SessionStore;
 use crate::prompt::PromptBuilder;
 use crate::sse::EventBus;
 use crate::config::LuminConfig;

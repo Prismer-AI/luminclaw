@@ -3,7 +3,7 @@
 
 use crate::provider::{Provider, ChatRequest, Message};
 use crate::memory::MemoryStore;
-use tracing::{info, warn};
+use tracing::info;
 
 /// Truncate oldest messages to fit within budget, keeping system + recent N.
 pub fn truncate_oldest_turns(messages: &mut Vec<Message>, max_chars: usize, keep_recent: usize) -> usize {
