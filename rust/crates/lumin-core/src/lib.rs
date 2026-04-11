@@ -30,7 +30,7 @@ pub mod tokens;
 // Re-exports
 pub use config::{LuminConfig, ApprovalConfig, SessionConfig, ServerConfig, EventBusConfig, MemoryConfig, LogConfig, ModulesConfig, PrismerConfig};
 pub use provider::{Provider, OpenAIProvider, FallbackProvider, ChatRequest, ChatResponse, ToolCall, ContentBlock, ImageUrlBlock, MessageContent};
-pub use tools::{Tool, ToolRegistry, ToolContext, ToolEvent, EmitFn};
+pub use tools::{Tool, ToolRegistry, ToolContext, ToolEvent, EmitFn, safe_path};
 pub use session::{Session, SessionStore};
 pub use agent::{PrismerAgent, AgentResult, AgentOptions};
 pub use agents::{AgentRegistry, AgentConfig, AgentMode, builtin_agents};

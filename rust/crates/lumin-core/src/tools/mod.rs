@@ -3,6 +3,7 @@
 use serde_json::Value;
 use std::collections::HashMap;
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -38,6 +39,35 @@ pub struct Tool {
     /// Return true if safe to run concurrently (read-only / no side effects).
     /// None = assume unsafe (serial). Mirrors TS `isConcurrencySafe`.
     pub is_concurrency_safe: Option<Arc<dyn Fn(&Value) -> bool + Send + Sync>>,
+}
+
+/// Resolve a user-supplied path to an absolute path within the workspace.
+/// Returns Err if the resolved path escapes the workspace root.
+/// Mirrors TS `safePath()` in `tools/builtins.ts:23-30`.
+pub fn safe_path(user_path: &str, workspace_dir: &str) -> Result<PathBuf, String> {
+    let base = PathBuf::from(workspace_dir)
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from(workspace_dir));
+    let candidate = if PathBuf::from(user_path).is_absolute() {
+        PathBuf::from(user_path)
+    } else {
+        base.join(user_path)
+    };
+
+    // Normalize by resolving . and .. components (mirrors path.resolve in TS)
+    let mut normalized = PathBuf::new();
+    for component in candidate.components() {
+        match component {
+            std::path::Component::ParentDir => { normalized.pop(); }
+            std::path::Component::CurDir => {}
+            other => normalized.push(other),
+        }
+    }
+
+    if !normalized.starts_with(&base) {
+        return Err(format!("Path traversal rejected: {user_path}"));
+    }
+    Ok(normalized)
 }
 
 pub struct ToolRegistry {
@@ -650,5 +680,38 @@ mod tests {
         reg.register(create_test_tool("bash", "run commands"));
         let filtered = reg.with_filter(|_| false);
         assert_eq!(filtered.size(), 0);
+    }
+
+    // ── path safety tests (mirrors TS safePath in builtins.ts:23-30) ──
+
+    #[test]
+    fn safe_path_resolves_relative() {
+        let result = super::safe_path("src/main.rs", "/workspace");
+        assert_eq!(result.unwrap(), std::path::PathBuf::from("/workspace/src/main.rs"));
+    }
+
+    #[test]
+    fn safe_path_rejects_traversal() {
+        let result = super::safe_path("../etc/passwd", "/workspace");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("traversal"));
+    }
+
+    #[test]
+    fn safe_path_rejects_absolute_escape() {
+        let result = super::safe_path("/etc/passwd", "/workspace");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn safe_path_allows_workspace_root() {
+        let result = super::safe_path(".", "/workspace");
+        assert_eq!(result.unwrap(), std::path::PathBuf::from("/workspace"));
+    }
+
+    #[test]
+    fn safe_path_normalizes_dot_segments() {
+        let result = super::safe_path("src/../src/main.rs", "/workspace");
+        assert_eq!(result.unwrap(), std::path::PathBuf::from("/workspace/src/main.rs"));
     }
 }
