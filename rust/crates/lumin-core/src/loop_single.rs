@@ -5,7 +5,8 @@ use crate::loop_types::*;
 use crate::artifacts::{Artifact, ArtifactStore, InMemoryArtifactStore};
 use crate::agent::{PrismerAgent, AgentOptions};
 use crate::provider::OpenAIProvider;
-use crate::tools::{ToolRegistry, create_bash_tool};
+use crate::tools::ToolRegistry;
+use crate::tools::builtins::register_all_builtins;
 use crate::session::SessionStore;
 use crate::prompt::PromptBuilder;
 use crate::sse::EventBus;
@@ -59,7 +60,7 @@ impl AgentLoop for SingleLoopAgent {
 
         // Set up tools
         let mut tools = ToolRegistry::new();
-        tools.register(create_bash_tool(self.config.workspace.dir.clone()));
+        register_all_builtins(&mut tools, &self.config.workspace.dir);
 
         // Set up EventBus
         let bus = if let Some(ref call_opts) = opts {

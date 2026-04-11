@@ -8,7 +8,7 @@ use axum::{
 };
 use lumin_core::provider::OpenAIProvider;
 use lumin_core::{PrismerAgent, AgentOptions, ToolRegistry, Session, PromptBuilder};
-use lumin_core::tools::create_bash_tool;
+use lumin_core::tools::builtins::register_all_builtins;
 use lumin_core::sse::EventBus;
 use serde_json::json;
 use std::sync::Arc;
@@ -101,7 +101,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
                 );
 
                 let mut tools = ToolRegistry::new();
-                tools.register(create_bash_tool(state.config.workspace.dir.clone()));
+                register_all_builtins(&mut tools, &state.config.workspace.dir);
 
                 let bus = Arc::new(EventBus::default());
 

@@ -9,7 +9,8 @@ use crate::task::{Task, TaskStatus, TaskStateMachine, InMemoryTaskStore, TaskSto
 use crate::world_model::WorldModel;
 use crate::agent::{PrismerAgent, AgentOptions};
 use crate::provider::OpenAIProvider;
-use crate::tools::{ToolRegistry, create_bash_tool};
+use crate::tools::ToolRegistry;
+use crate::tools::builtins::register_all_builtins;
 use crate::session::Session;
 use crate::prompt::PromptBuilder;
 use crate::config::LuminConfig;
@@ -260,7 +261,7 @@ async fn run_inner_loop(
     );
 
     let mut tools = ToolRegistry::new();
-    tools.register(create_bash_tool(config.workspace.dir.clone()));
+    register_all_builtins(&mut tools, &config.workspace.dir);
 
     // Build system prompt with handoff context
     let mut pb = PromptBuilder::new(&config.workspace.dir);
