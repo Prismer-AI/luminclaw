@@ -260,3 +260,21 @@ describe('WS protocol messages', () => {
     expect(parsed.message).toBe('Invalid JSON');
   });
 });
+
+// ── /v1/tools completeness ──────────────────────────────
+
+describe('/v1/tools completeness', () => {
+  it('getToolSpecs returns all builtin tools', async () => {
+    const { getToolSpecs } = await import('../src/index.js');
+    const { specs, count } = await getToolSpecs();
+
+    const names = specs.map((s: any) => s.function.name);
+
+    // Core builtins that must always be present
+    const required = ['bash', 'read_file', 'write_file', 'list_files', 'edit_file', 'grep', 'web_fetch', 'think', 'memory_store', 'memory_recall'];
+    for (const name of required) {
+      expect(names, `missing tool: ${name}`).toContain(name);
+    }
+    expect(count).toBeGreaterThanOrEqual(required.length);
+  });
+});
