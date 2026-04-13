@@ -27,6 +27,17 @@ export interface Checkpoint {
   emittedAt: number;
 }
 
+// ── TaskProgress ─────────────────────────────────────────
+
+export interface TaskProgress {
+  /** Number of agent-loop iterations completed so far. */
+  iterations: number;
+  /** Unique tool names invoked so far, in first-use order. */
+  toolsUsed: string[];
+  /** Epoch-ms of last activity (LLM turn end or tool return). */
+  lastActivity: number;
+}
+
 // ── Task ──────────────────────────────────────────────────
 
 export interface Task {
@@ -47,6 +58,8 @@ export interface Task {
   result?: string;
   /** Error message (set on failure). */
   error?: string;
+  /** Runtime progress tracking (iterations, tools used, last activity). */
+  progress?: TaskProgress;
   createdAt: number;
   updatedAt: number;
 }
@@ -60,6 +73,10 @@ export interface TaskStore {
   addCheckpoint(taskId: string, checkpoint: Omit<Checkpoint, 'taskId'>): Checkpoint | undefined;
   /** Get the currently active task (executing or paused). */
   getActive(): Task | undefined;
+  /** Get the active (executing or paused) task for a specific session. */
+  getActiveForSession(sessionId: string): Task | undefined;
+  /** Update progress fields on a task (merges with existing progress). */
+  updateProgress(id: string, progress: Partial<TaskProgress>): Task | undefined;
   list(): Task[];
   clear(): void;
 }

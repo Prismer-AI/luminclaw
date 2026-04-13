@@ -4,7 +4,7 @@
  * @module task/store
  */
 
-import type { Task, Checkpoint, TaskStore } from './types.js';
+import type { Task, Checkpoint, TaskStore, TaskProgress } from './types.js';
 
 export class InMemoryTaskStore implements TaskStore {
   private tasks = new Map<string, Task>();
@@ -46,6 +46,27 @@ export class InMemoryTaskStore implements TaskStore {
       if (task.status === 'executing' || task.status === 'paused') return task;
     }
     return undefined;
+  }
+
+  getActiveForSession(sessionId: string): Task | undefined {
+    for (const task of this.tasks.values()) {
+      if (task.sessionId === sessionId &&
+          (task.status === 'executing' || task.status === 'paused')) {
+        return task;
+      }
+    }
+    return undefined;
+  }
+
+  updateProgress(id: string, progress: Partial<TaskProgress>): Task | undefined {
+    const task = this.tasks.get(id);
+    if (!task) return undefined;
+    task.progress = {
+      ...(task.progress ?? { iterations: 0, toolsUsed: [], lastActivity: 0 }),
+      ...progress,
+    };
+    task.updatedAt = Date.now();
+    return task;
   }
 
   list(): Task[] {
