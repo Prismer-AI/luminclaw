@@ -50,6 +50,8 @@ export interface AgentLoopResult {
   sessionId: string;
   /** Task ID — present only in dual-loop mode. */
   taskId?: string;
+  /** True when this message was enqueued to an existing active task instead of creating a new one. */
+  queued?: boolean;
 }
 
 export interface AgentLoopCallOpts {

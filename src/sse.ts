@@ -127,6 +127,10 @@ export const AgentEventSchema = z.discriminatedUnion('type', [
     data: z.object({ taskId: z.string(), sessionId: z.string(), instruction: z.string() }),
   }),
   z.object({
+    type: z.literal('task.message.enqueued'),
+    data: z.object({ taskId: z.string(), messageId: z.string(), content: z.string() }),
+  }),
+  z.object({
     type: z.literal('task.planning'),
     data: z.object({ taskId: z.string(), goal: z.string() }),
   }),

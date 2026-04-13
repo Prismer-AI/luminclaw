@@ -18,6 +18,7 @@ import { loadWorkspaceToolsFromPlugin, createTool } from '../tools/index.js';
 import { OpenAICompatibleProvider, FallbackProvider, type Provider } from '../provider.js';
 import { InMemoryArtifactStore } from '../artifacts/memory.js';
 import { InMemoryTaskStore } from '../task/store.js';
+import { MessageQueue } from '../task/message-queue.js';
 import { TaskStateMachine } from '../task/machine.js';
 import { DirectiveRouter } from './directive-router.js';
 import { AgentViewStack } from './view-stack.js';
@@ -39,6 +40,7 @@ export class DualLoopAgent implements IAgentLoop {
 
   readonly artifacts = new InMemoryArtifactStore();
   readonly tasks = new InMemoryTaskStore();
+  readonly messageQueue = new MessageQueue();
   readonly sessions = new SessionStore();
   readonly stateMachine = new TaskStateMachine();
   directiveRouter: DirectiveRouter;
@@ -62,9 +64,30 @@ export class DualLoopAgent implements IAgentLoop {
   async processMessage(input: AgentLoopInput, opts?: AgentLoopCallOpts): Promise<AgentLoopResult> {
     const bus = opts?.bus ?? new EventBus();
     this.activeBus = bus;
-    this.abortController = new AbortController();
 
     const sessionId = input.sessionId ?? `dual-${Date.now()}`;
+
+    // A3: If this session has an active task, enqueue to it and return early.
+    const existing = this.tasks.getActiveForSession(sessionId);
+    if (existing) {
+      const queued = this.messageQueue.enqueue(existing.id, input.content);
+      bus.publish({
+        type: 'task.message.enqueued' as const,
+        data: { taskId: existing.id, messageId: queued.id, content: input.content.slice(0, 500) },
+      });
+      return {
+        text: `Message queued for task ${existing.id}.`,
+        directives: [],
+        toolsUsed: [],
+        iterations: 0,
+        sessionId,
+        taskId: existing.id,
+        queued: true,
+      };
+    }
+
+    // No active task — create one as before.
+    this.abortController = new AbortController();
     const session = this.sessions.getOrCreate(sessionId);
     const taskId = randomUUID();
 
