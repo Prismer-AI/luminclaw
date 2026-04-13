@@ -292,6 +292,26 @@ export class DualLoopAgent implements IAgentLoop {
       maxIterations: (inputCfg.maxIterations as number) ?? cfg.agent.maxIterations,
       agentId: 'researcher',
       workspaceDir,
+      onIterationStart: async (iteration, sessionArg) => {
+        // A5: Drain MessageQueue for this task and inject as user messages.
+        const drained = this.messageQueue.drainForTask(task.id);
+        for (const m of drained) {
+          sessionArg.addMessage({ role: 'user', content: m.content });
+        }
+        // Update progress and emit task.progress event.
+        const current = this.tasks.get(task.id);
+        const prev = current?.progress ?? { iterations: 0, toolsUsed: [], lastActivity: 0 };
+        const lastActivity = Date.now();
+        this.tasks.updateProgress(task.id, {
+          iterations: iteration,
+          toolsUsed: prev.toolsUsed,
+          lastActivity,
+        });
+        outerBus.publish({
+          type: 'task.progress' as const,
+          data: { taskId: task.id, iteration, toolsUsed: prev.toolsUsed, lastActivity },
+        });
+      },
     });
 
     try {

@@ -131,6 +131,15 @@ export const AgentEventSchema = z.discriminatedUnion('type', [
     data: z.object({ taskId: z.string(), messageId: z.string(), content: z.string() }),
   }),
   z.object({
+    type: z.literal('task.progress'),
+    data: z.object({
+      taskId: z.string(),
+      iteration: z.number(),
+      toolsUsed: z.array(z.string()),
+      lastActivity: z.number(),
+    }),
+  }),
+  z.object({
     type: z.literal('task.planning'),
     data: z.object({ taskId: z.string(), goal: z.string() }),
   }),
