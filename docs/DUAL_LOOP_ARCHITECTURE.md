@@ -2,7 +2,7 @@
 
 ## Lumin — Runtime Mode Switching: Single-Loop / Dual-Loop
 
-> **Status**: Implemented (TS + Rust), validated with real LLM
+> **Status**: Structural scaffolding implemented. Capability validation pending — see [`docs/superpowers/plans/2026-04-13-dual-loop-audit-and-roadmap.md`](./superpowers/plans/2026-04-13-dual-loop-audit-and-roadmap.md).
 > **Runtimes**: TypeScript (primary), Rust (core-parity — see §10 for divergences)
 > **Mode**: `LUMIN_LOOP_MODE=single` (default) | `dual`
 > **Tests**: TS 521, Rust 491, total 1,012 + stress 16
@@ -380,7 +380,7 @@ Both TS and Rust servers are started, identical requests are sent, structural eq
 | P4 | Multi-step: both handle 2+ tool iterations |
 | P5 | Session: both recall context across requests |
 | P6 | Memory: both `memory_store` + `memory_recall` |
-| P7 | Dual-loop: both return quickly with task info |
+| P7 | Dual-loop: both return quickly with task info (validates immediate `taskId` return only; does NOT validate end-to-end task execution with client subscription — see audit doc §1.3) |
 | P8 | Dual-loop health: both report `loopMode: "dual"` |
 | P9 | WebSocket: both produce `open → connected → chat.final` |
 | P10 | Errors: both handle empty content gracefully |
@@ -465,6 +465,12 @@ When the inner loop completes, `chat.final` is published to the EventBus. If no 
 ### Rust cancellation is incomplete
 
 The Rust `DualLoopAgent.cancel()` sets a `cancelled` flag and transitions the task to `failed`, but the inner loop does not check this flag between iterations. A running Rust inner loop continues until the current agent cycle naturally completes.
+
+### Dialogue cannot steer running tasks
+
+New messages create independent tasks rather than injecting into the currently-running task. The outer dialogue loop has no communication channel to the inner execution loop after spawn. This means the dual-loop does not provide the "interrupt/steer mid-flight" capability documented in the architecture overview. See audit doc §1.2 "Architectural Root Cause" and the companion design doc's Pattern 1 (Message Queue) for the architectural gap and proposed fix.
+
+**Mitigation path**: Phase A of the improvement roadmap (`2026-04-13-dual-loop-audit-and-roadmap.md` §3) adds a process-global message queue that allows dialogue-layer messages to be enqueued for delivery to a running task at its next iteration boundary.
 
 ---
 
