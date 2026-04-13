@@ -278,3 +278,80 @@ describe('/v1/tools completeness', () => {
     expect(count).toBeGreaterThanOrEqual(required.length);
   });
 });
+
+// ── GET /v1/tasks/:id — progress field ──────────────────
+//
+// handleGetTask does json(res, 200, task) — a full pass-through — so any field
+// present on the Task object is automatically included in the JSON response.
+// These tests exercise the store layer that handleGetTask reads from, confirming
+// that TaskProgress round-trips through the store and would therefore appear in
+// the HTTP response without any whitelist changes.
+
+describe('GET /v1/tasks/:id — progress field', () => {
+  it('includes TaskProgress when task has it', async () => {
+    const { InMemoryTaskStore } = await import('../src/index.js');
+    const store = new InMemoryTaskStore();
+
+    const task = store.create({
+      id: 'task-progress-test-1',
+      sessionId: 'sess-1',
+      instruction: 'test task',
+      artifactIds: [],
+      status: 'executing',
+    });
+
+    store.updateProgress(task.id, {
+      iterations: 2,
+      toolsUsed: ['bash', 'read_file'],
+      lastActivity: 1000,
+    });
+
+    const fetched = store.get(task.id);
+    expect(fetched).toBeDefined();
+    expect(fetched!.progress).toEqual({
+      iterations: 2,
+      toolsUsed: ['bash', 'read_file'],
+      lastActivity: 1000,
+    });
+  });
+
+  it('progress is undefined when updateProgress has not been called', async () => {
+    const { InMemoryTaskStore } = await import('../src/index.js');
+    const store = new InMemoryTaskStore();
+
+    const task = store.create({
+      id: 'task-progress-test-2',
+      sessionId: 'sess-2',
+      instruction: 'another test task',
+      artifactIds: [],
+      status: 'pending',
+    });
+
+    const fetched = store.get(task.id);
+    expect(fetched).toBeDefined();
+    expect(fetched!.progress).toBeUndefined();
+  });
+
+  it('progress merges partial updates correctly', async () => {
+    const { InMemoryTaskStore } = await import('../src/index.js');
+    const store = new InMemoryTaskStore();
+
+    const task = store.create({
+      id: 'task-progress-test-3',
+      sessionId: 'sess-3',
+      instruction: 'merge test task',
+      artifactIds: [],
+      status: 'executing',
+    });
+
+    store.updateProgress(task.id, { iterations: 1, toolsUsed: ['bash'], lastActivity: 500 });
+    store.updateProgress(task.id, { iterations: 3, lastActivity: 1500 });
+
+    const fetched = store.get(task.id);
+    expect(fetched!.progress).toEqual({
+      iterations: 3,
+      toolsUsed: ['bash'],   // preserved from first update
+      lastActivity: 1500,
+    });
+  });
+});
