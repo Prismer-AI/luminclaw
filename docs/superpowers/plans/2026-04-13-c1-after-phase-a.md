@@ -308,3 +308,16 @@ known_environment_issues:
 ### Residual gap beyond Phase A scope
 
 A5's drain fires at the **start** of each iteration. If a task completes in one iteration (a common case for short prompts), a steering message that arrives *after* that iteration started is never drained. The queue entry remains orphaned when the task terminates. Phase A does not claim to address this; it is noted here for Phase B scope.
+
+## 7. Fix outcome
+
+Commit `eb4b5bf` closed the two HTTP-contract regressions identified in §4.
+
+### Re-measurement results
+
+- **G1 (queued field):** POST 2 response now includes `"queued": true` and `"taskId": "<same-as-POST-1>"`. PASS.
+- **G2 (progress field):** GET /v1/tasks/:id now includes `"progress": {"iterations": 1, "toolsUsed": [], "lastActivity": <timestamp>}` when populated. PASS.
+
+### Remaining known edge (Gap 3 — deferred to Phase C)
+
+A5's drain callback fires at iteration start. For single-iteration tasks, queued steering messages that arrive after iteration 1 starts but before it completes are orphaned — no iteration 2 exists to drain them. Phase C's structured abort + completion-hook work will naturally address this by adding a drain-on-completion step. Tracked as Phase A residual.
