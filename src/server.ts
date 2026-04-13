@@ -263,6 +263,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
     sessionId: result.sessionId,
     iterations: result.iterations,
     taskId: result.taskId,
+    queued: result.queued,
     loopMode: getLoop().mode,
     events: events.length,
   });

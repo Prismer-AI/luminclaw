@@ -279,13 +279,68 @@ describe('/v1/tools completeness', () => {
   });
 });
 
+// ── HTTP layer — Phase A field pass-through ──────────────
+
+describe('HTTP layer — Phase A field pass-through', () => {
+  it('POST /v1/chat response includes queued:true when enqueuing', async () => {
+    // Verifies that processMessage returns queued:true when enqueuing to an
+    // active task — this is the value handleChat must forward in the HTTP body.
+    // handleChat in src/server.ts builds its JSON response object from individual
+    // result fields; adding queued:result.queued to that object closes G1.
+    const { DualLoopAgent } = await import('../src/loop/dual.js');
+    const { EventBus } = await import('../src/sse.js');
+
+    const loop = new DualLoopAgent();
+    vi.spyOn(loop as any, 'runInnerLoop').mockResolvedValue(undefined);
+
+    const bus = new EventBus();
+    const first = await loop.processMessage({ content: 'a', sessionId: 'sess-g1' }, { bus });
+
+    // Force the task into executing state so it registers as "active".
+    loop.tasks.update(first.taskId!, { status: 'executing' });
+
+    const second = await loop.processMessage({ content: 'b', sessionId: 'sess-g1' }, { bus });
+
+    // G1 core assertion: queued must be present and true on the result that
+    // handleChat receives — and therefore must be forwarded to the HTTP response.
+    expect((second as any).queued).toBe(true);
+    expect(second.taskId).toBe(first.taskId);
+  });
+
+  it('GET /v1/tasks/:id response includes progress when the task has it', async () => {
+    const { DualLoopAgent } = await import('../src/loop/dual.js');
+    const { InMemoryTaskStore } = await import('../src/index.js');
+
+    const loop = new DualLoopAgent();
+
+    // Manually insert a task with progress into the loop's task store.
+    loop.tasks.create({
+      id: 't-g2',
+      sessionId: 's-g2',
+      instruction: 'test',
+      artifactIds: [],
+      status: 'executing',
+    });
+    loop.tasks.updateProgress('t-g2', { iterations: 3, toolsUsed: ['bash'], lastActivity: 1000 });
+
+    // G2: DualLoopAgent.getTask projection must include the progress field.
+    const projected = loop.getTask('t-g2');
+    expect(projected).toBeDefined();
+    expect((projected as any).progress).toEqual({
+      iterations: 3,
+      toolsUsed: ['bash'],
+      lastActivity: 1000,
+    });
+  });
+});
+
 // ── GET /v1/tasks/:id — progress field ──────────────────
 //
-// handleGetTask does json(res, 200, task) — a full pass-through — so any field
-// present on the Task object is automatically included in the JSON response.
+// handleGetTask calls loop.getTask(taskId) — a whitelisted projection — so
+// the field must be explicitly included in DualLoopAgent.getTask's return.
 // These tests exercise the store layer that handleGetTask reads from, confirming
 // that TaskProgress round-trips through the store and would therefore appear in
-// the HTTP response without any whitelist changes.
+// the HTTP response once the projection is fixed.
 
 describe('GET /v1/tasks/:id — progress field', () => {
   it('includes TaskProgress when task has it', async () => {

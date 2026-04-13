@@ -415,6 +415,7 @@ export class DualLoopAgent implements IAgentLoop {
       status: t.status,
       artifactIds: t.artifactIds,
       checkpoints: t.checkpoints,
+      progress: t.progress,
       result: t.result,
       error: t.error,
       createdAt: t.createdAt,
