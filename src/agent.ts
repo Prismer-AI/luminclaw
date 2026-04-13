@@ -72,6 +72,13 @@ export interface AgentOptions {
   abortSignal?: AbortSignal;
   /** Recursion depth — prevents infinite sub-agent delegation. */
   _depth?: number;
+  /**
+   * Fires at the start of each iteration, before the LLM call.
+   * DualLoopAgent uses this to drain its MessageQueue and inject queued
+   * user messages into the session history. Errors are caught and logged;
+   * they do not halt the iteration.
+   */
+  onIterationStart?: (iteration: number, session: Session) => Promise<void>;
 }
 
 // ── LoopState ───────────────────────────────────────────
@@ -179,6 +186,7 @@ export class PrismerAgent {
   private readonly workspaceDir: string;
   private readonly depth: number;
   private readonly abortSignal?: AbortSignal;
+  private readonly onIterationStart?: (iteration: number, session: Session) => Promise<void>;
   private thinkingLevel?: ThinkingLevel;
   private approvalResolvers = new Map<string, (approved: boolean) => void>();
 
@@ -198,6 +206,7 @@ export class PrismerAgent {
     this.thinkingLevel = options.thinkingLevel;
     this.depth = options._depth ?? 0;
     this.abortSignal = options.abortSignal;
+    this.onIterationStart = options.onIterationStart;
   }
 
   needsApproval(toolName: string, args: Record<string, unknown>): boolean {
@@ -359,6 +368,12 @@ export class PrismerAgent {
 
     while (state.iteration++ < this.maxIterations) {
       if (this.abortSignal?.aborted) { state.lastText = '[Aborted by user]'; break; }
+
+      // A4: fire onIterationStart callback (DualLoopAgent uses this to drain MessageQueue)
+      if (this.onIterationStart) {
+        try { await this.onIterationStart(state.iteration, session); }
+        catch (err) { log.warn('onIterationStart threw', { error: err instanceof Error ? err.message : String(err) }); }
+      }
 
       microcompact(state.messages, 5);
 

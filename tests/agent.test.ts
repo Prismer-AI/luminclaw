@@ -12,6 +12,7 @@ import { AgentRegistry, BUILTIN_AGENTS } from '../src/agents.js';
 import { ConsoleObserver } from '../src/observer.js';
 import { EventBus } from '../src/sse.js';
 import { Session } from '../src/session.js';
+import { createTool } from '../src/tools/loader.js';
 import type { Provider, ChatRequest, ChatResponse } from '../src/provider.js';
 
 /** Drain an AsyncGenerator, discarding yielded values, and return the final value. */
@@ -510,6 +511,88 @@ describe('PrismerAgent', () => {
       expect((memEvents[1].data as any).action).toBe('recall');
       expect((memEvents[1].data as any).query).toBe('backtest');
       expect((memEvents[1].data as any).resultCount).toBe(3);
+    });
+  });
+
+  describe('onIterationStart callback', () => {
+    it('is invoked before each LLM call with (iteration, session)', async () => {
+      const provider: Provider = {
+        name: () => 'mock',
+        chat: vi.fn().mockResolvedValue({
+          text: 'done', toolCalls: undefined,
+          usage: { promptTokens: 1, completionTokens: 1 },
+        }),
+      };
+      const calls: Array<{ iteration: number; sessionId: string }> = [];
+      const agents = new AgentRegistry();
+      agents.registerMany(BUILTIN_AGENTS);
+      const agent = new PrismerAgent({
+        provider,
+        tools: new ToolRegistry(),
+        observer: new ConsoleObserver(),
+        agents,
+        systemPrompt: 'sys',
+        maxIterations: 3,
+        onIterationStart: async (iteration, session) => {
+          calls.push({ iteration, sessionId: session.id });
+        },
+      });
+      const session = new Session('sess-x');
+      await drainGenerator(agent.processMessage('hi', session));
+      expect(calls.length).toBe(1);
+      expect(calls[0]).toEqual({ iteration: 1, sessionId: 'sess-x' });
+    });
+
+    it('fires once per iteration when the model requests tool calls', async () => {
+      const provider: Provider = {
+        name: () => 'mock',
+        chat: vi.fn()
+          .mockResolvedValueOnce({
+            text: '',
+            toolCalls: [{ id: 'c1', name: 'bash', arguments: { command: 'echo hi' } }],
+            usage: { promptTokens: 1, completionTokens: 1 },
+          })
+          .mockResolvedValueOnce({
+            text: 'done', toolCalls: undefined,
+            usage: { promptTokens: 2, completionTokens: 1 },
+          }),
+      };
+      const tools = new ToolRegistry();
+      tools.register(createTool(
+        'bash', 'run',
+        { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] },
+        async () => 'ok',
+      ));
+      const calls: number[] = [];
+      const agents = new AgentRegistry();
+      agents.registerMany(BUILTIN_AGENTS);
+      const agent = new PrismerAgent({
+        provider,
+        tools, observer: new ConsoleObserver(), agents,
+        systemPrompt: 'sys', maxIterations: 5,
+        onIterationStart: async (iteration) => { calls.push(iteration); },
+      });
+      await drainGenerator(agent.processMessage('hi', new Session('s')));
+      expect(calls).toEqual([1, 2]);
+    });
+
+    it('works when callback is omitted (backwards compat)', async () => {
+      const provider: Provider = {
+        name: () => 'mock',
+        chat: vi.fn().mockResolvedValue({
+          text: 'ok', toolCalls: undefined,
+          usage: { promptTokens: 1, completionTokens: 1 },
+        }),
+      };
+      const agents = new AgentRegistry();
+      agents.registerMany(BUILTIN_AGENTS);
+      const agent = new PrismerAgent({
+        provider,
+        tools: new ToolRegistry(), observer: new ConsoleObserver(),
+        agents, systemPrompt: 'sys', maxIterations: 2,
+      });
+      const r = await drainGenerator(agent.processMessage('hi', new Session('s')));
+      expect(r.text).toBe('ok');
     });
   });
 });
