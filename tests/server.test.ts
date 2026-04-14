@@ -286,30 +286,62 @@ describe('/v1/tools completeness', () => {
 // ── HTTP layer — Phase A field pass-through ──────────────
 
 describe('HTTP layer — Phase A field pass-through', () => {
-  it('POST /v1/chat response includes queued:true when enqueuing', async () => {
+  it('POST /v1/chat response includes queued:true when enqueuing (real LLM)', async () => {
     // Verifies that processMessage returns queued:true when enqueuing to an
     // active task — this is the value handleChat must forward in the HTTP body.
-    // handleChat in src/server.ts builds its JSON response object from individual
-    // result fields; adding queued:result.queued to that object closes G1.
+    //
+    // Rewritten per `no_mock_for_agent_infra`: drives a real LLM task whose
+    // first request enters 'executing', then posts a follow-up on the same
+    // session to exercise the enqueue path.
+    const { HAS_REAL_LLM, loadEnvTest, waitUntil } = await import('./helpers/real-llm.js');
+    if (!HAS_REAL_LLM) return; // skip if no LLM credentials (mirrors describeReal)
+    loadEnvTest();
+
+    const prevWorkspace = process.env.WORKSPACE_DIR;
+    const prevLoopMode = process.env.LUMIN_LOOP_MODE;
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'lumin-server-real-'));
+    process.env.WORKSPACE_DIR = tmpDir;
+    process.env.LUMIN_LOOP_MODE = 'dual';
+    resetConfig();
+
     const { DualLoopAgent } = await import('../src/loop/dual.js');
     const { EventBus } = await import('../src/sse.js');
 
     const loop = new DualLoopAgent();
-    vi.spyOn(loop as any, 'runInnerLoop').mockResolvedValue(undefined);
+    try {
+      const bus = new EventBus();
+      const first = await loop.processMessage(
+        {
+          content: 'Reply with the number 1, then 2, then 3, each on its own line, separated by pauses.',
+          sessionId: 'sess-g1',
+        },
+        { bus },
+      );
 
-    const bus = new EventBus();
-    const first = await loop.processMessage({ content: 'a', sessionId: 'sess-g1' }, { bus });
+      // Wait until the inner loop reaches 'executing' (the active window
+      // during which follow-ups enqueue).
+      const executing = await waitUntil(() => loop.tasks.get(first.taskId!)?.status === 'executing', 15_000, 50);
+      expect(executing).toBe(true);
 
-    // Force the task into executing state so it registers as "active".
-    loop.tasks.update(first.taskId!, { status: 'executing' });
+      const second = await loop.processMessage(
+        { content: 'follow-up', sessionId: 'sess-g1' },
+        { bus },
+      );
 
-    const second = await loop.processMessage({ content: 'b', sessionId: 'sess-g1' }, { bus });
-
-    // G1 core assertion: queued must be present and true on the result that
-    // handleChat receives — and therefore must be forwarded to the HTTP response.
-    expect((second as any).queued).toBe(true);
-    expect(second.taskId).toBe(first.taskId);
-  });
+      // Core assertion: queued must be present and true on the result that
+      // handleChat receives — and therefore must be forwarded to the HTTP response.
+      expect((second as { queued?: boolean }).queued).toBe(true);
+      expect(second.taskId).toBe(first.taskId);
+    } finally {
+      await loop.shutdown();
+      if (prevWorkspace === undefined) delete process.env.WORKSPACE_DIR;
+      else process.env.WORKSPACE_DIR = prevWorkspace;
+      if (prevLoopMode === undefined) delete process.env.LUMIN_LOOP_MODE;
+      else process.env.LUMIN_LOOP_MODE = prevLoopMode;
+      resetConfig();
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  }, 60_000);
 
   it('GET /v1/tasks/:id response includes progress when the task has it', async () => {
     const { DualLoopAgent } = await import('../src/loop/dual.js');
