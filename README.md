@@ -20,8 +20,11 @@
 ## Features
 
 - **Agent loop** — tool calling, sub-agent delegation, doom-loop detection, context guard
+- **Dual-loop mode** (`LUMIN_LOOP_MODE=dual`) — async task execution decoupled from the dialogue loop. User messages enqueue into running tasks, `task.progress` streams per iteration, tasks survive server restart via disk-backed transcripts, `POST /v1/tasks/:id/resume` picks up from the last persisted turn
+- **Structured cancel** — `POST /v1/tasks/:id/cancel` with `AbortReason` propagation; in-flight LLM fetch and tool executions honor the signal; dangling tool calls are synthesized as `[Aborted: <reason>]` so history stays well-formed
+- **Permission modes** — `default` / `plan` / `auto` / `bypass`. Dual-loop runs in `auto` (auto-denies `requiresUserInteraction` tools). `enter_plan_mode` / `exit_plan_mode` tools flip the mode mid-conversation
 - **OpenAI-compatible** — works with any `/chat/completions` endpoint (OpenAI, Anthropic, Ollama, etc.)
-- **File-based memory** — keyword recall, zero vector DB dependency. Beats Letta/MemGPT on LoCoMo (86% vs 74%)
+- **File-based memory** — keyword recall, zero vector DB dependency. Beats Letta/MemGPT on LoCoMo (86% vs 74%). Cross-task knowledge: `WorldModel.knowledgeBase` facts persisted to MemoryStore on task completion, recalled on next task start
 - **Context compaction** — automatic fact extraction + LLM summarization when context overflows
 - **Lifecycle hooks** — `before_prompt`, `before_tool`, `after_tool`, `agent_end`
 - **Skills** — installable SKILL.md extensions with ClawHub (pure JS git clone)
@@ -29,6 +32,7 @@
 - **HTTP + WebSocket gateway** — zero external dependencies, real-time streaming
 - **CLI** — `lumin agent`, `lumin serve`, `lumin health`
 - **~4,900 LOC** — single production dependency (Zod)
+- **Capability-validated** — end-to-end dual-loop tests C1 (dialogue decoupling), C3 (polling), C4 (reliable cancel), C5 (per-iteration progress), C6 (concurrent isolation), C7 (cross-task knowledge) all pass against a real LLM. Run with `RUN_CAPABILITY_TESTS=1 npx vitest run tests/capability/`
 
 ## Quick Start
 
