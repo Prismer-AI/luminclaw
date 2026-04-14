@@ -68,6 +68,10 @@
     "./config": {
       "types": "./dist/config.d.ts",
       "default": "./dist/config.js"
+    },
+    "./embedded": {
+      "import": "./dist/embedded.js",
+      "types": "./dist/embedded.d.ts"
     }
   },
   "files": [
