@@ -35,7 +35,6 @@ import { estimateMessageTokens } from './tokens.js';
 import type { MemoryStore } from './memory.js';
 import { loadConfig } from './config.js';
 import { createLogger } from './log.js';
-import { readdirSync, readFileSync, unlinkSync } from 'node:fs';
 
 const log = createLogger('agent');
 
@@ -55,6 +54,16 @@ export interface AgentResult {
   usage?: { promptTokens: number; completionTokens: number };
   /** Number of LLM iterations executed. */
   iterations: number;
+}
+
+/**
+ * Scans a directive source (filesystem, IPC, shared memory, etc.) and pushes
+ * pending directives onto a session. Injected via {@link AgentOptions} so that
+ * embedded runtimes can omit the Node filesystem dependency entirely.
+ */
+export interface DirectiveScanner {
+  scan(session: Session, knownFiles?: Set<string>): void;
+  snapshot(): Set<string>;
 }
 
 /**
@@ -85,6 +94,13 @@ export interface AgentOptions {
    * they do not halt the iteration.
    */
   onIterationStart?: (iteration: number, session: Session) => Promise<void>;
+  /**
+   * Optional directive source scanner. When present, the agent delegates
+   * `scanDirectiveFiles` / `snapshotDirectiveFiles` to it. When absent, both
+   * calls are no-ops — useful for embedded runtimes that don't have a
+   * filesystem-backed directive pipeline.
+   */
+  directiveScanner?: DirectiveScanner;
 }
 
 // ── LoopState ───────────────────────────────────────────
@@ -193,6 +209,7 @@ export class PrismerAgent {
   private readonly depth: number;
   private readonly abortSignal?: AbortSignal;
   private readonly onIterationStart?: (iteration: number, session: Session) => Promise<void>;
+  private readonly directiveScanner?: DirectiveScanner;
   private thinkingLevel?: ThinkingLevel;
   private approvalResolvers = new Map<string, (approved: boolean) => void>();
 
@@ -213,6 +230,7 @@ export class PrismerAgent {
     this.depth = options._depth ?? 0;
     this.abortSignal = options.abortSignal;
     this.onIterationStart = options.onIterationStart;
+    this.directiveScanner = options.directiveScanner;
   }
 
   needsApproval(toolName: string, args: Record<string, unknown>): boolean {
@@ -244,26 +262,11 @@ export class PrismerAgent {
   }
 
   private scanDirectiveFiles(session: Session, knownFiles?: Set<string>): void {
-    const dirPath = `${this.workspaceDir}/.openclaw/directives`;
-    let files: string[];
-    try { files = readdirSync(dirPath).filter(f => f.endsWith('.json')); } catch { return; }
-    for (const file of files) {
-      if (knownFiles && knownFiles.has(file)) continue;
-      try {
-        const raw = readFileSync(`${dirPath}/${file}`, 'utf-8');
-        const parsed = JSON.parse(raw);
-        const directive: Directive = { type: parsed.type, payload: parsed.payload || {}, timestamp: parsed.timestamp || String(Date.now()) };
-        session.addPendingDirective(directive);
-        this.bus?.publish({ type: 'directive', data: { type: directive.type, payload: directive.payload, timestamp: directive.timestamp } });
-        this.observer.recordEvent({ type: 'directive_emit', timestamp: Date.now(), data: { type: directive.type, payload: directive.payload } });
-        unlinkSync(`${dirPath}/${file}`);
-      } catch { /* skip */ }
-    }
+    this.directiveScanner?.scan(session, knownFiles);
   }
 
   private snapshotDirectiveFiles(): Set<string> {
-    const dirPath = `${this.workspaceDir}/.openclaw/directives`;
-    try { return new Set(readdirSync(dirPath).filter(f => f.endsWith('.json'))); } catch { return new Set(); }
+    return this.directiveScanner?.snapshot() ?? new Set();
   }
 
   /**
@@ -475,6 +478,10 @@ export class PrismerAgent {
         catch (err) { log.warn('onIterationStart threw', { error: err instanceof Error ? err.message : String(err) }); }
       }
 
+      // H1: scan for any externally-dropped directives before the LLM call
+      // (covers the case where directives arrive on iterations without tool calls)
+      this.scanDirectiveFiles(session);
+
       microcompact(state.messages, 5);
 
       const beforeCount = state.messages.length;
@@ -633,6 +640,7 @@ export class PrismerAgent {
         provider: this.provider, tools: filteredTools, observer: this.observer, agents: this.agents, bus: this.bus,
         systemPrompt: config.systemPrompt, model: config.model ?? this.model, maxIterations: config.maxIterations ?? 20,
         agentId: config.id, workspaceDir: this.workspaceDir, _depth: this.depth + 1, abortSignal: childAbort.signal,
+        directiveScanner: this.directiveScanner,
       });
       const gen = subAgent.processMessage(message, childSession);
       let iterResult = await gen.next();

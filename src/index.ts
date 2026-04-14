@@ -11,6 +11,7 @@
  */
 
 import { PrismerAgent, type AgentResult } from './agent.js';
+import { FsDirectiveScanner } from './agent-fs-directive-scanner.js';
 import { AgentRegistry, BUILTIN_AGENTS } from './agents.js';
 import { OpenAICompatibleProvider, FallbackProvider, type Provider } from './provider.js';
 import { ToolRegistry } from './tools.js';
@@ -341,6 +342,7 @@ export async function runAgent(input: InputMessage, opts: RunAgentOptions = {}):
     agentId,
     workspaceDir,
     abortSignal: opts.signal,
+    directiveScanner: new FsDirectiveScanner(workspaceDir, bus, observer),
   });
 
   try {

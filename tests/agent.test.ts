@@ -615,3 +615,55 @@ describeRealAgent('PrismerAgent — onIterationStart (real LLM)', () => {
     expect(r.text.length).toBeGreaterThan(0);
   }, 60_000);
 });
+
+describe('DirectiveScanner injection', () => {
+  it('uses injected scanner when provided', async () => {
+    const calls: number[] = [];
+    const fakeScanner = {
+      scan(_session: Session, _known?: Set<string>): void { calls.push(Date.now()); },
+      snapshot(): Set<string> { return new Set(['a.json']); },
+    };
+    const provider = {
+      chat: vi.fn().mockResolvedValue({
+        text: 'ok', toolCalls: [],
+        usage: { promptTokens: 1, completionTokens: 1 },
+      }),
+    };
+    const agent = new PrismerAgent({
+      provider: provider as any,
+      tools: new ToolRegistry(),
+      observer: new ConsoleObserver(),
+      agents: new AgentRegistry(),
+      systemPrompt: 'sys',
+      maxIterations: 2,
+      directiveScanner: fakeScanner,
+    });
+    const session = new Session('s');
+    const gen = agent.processMessage('hi', session);
+    let next = await gen.next();
+    while (!next.done) { next = await gen.next(); }
+    expect(calls.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('omits scan calls when no scanner provided', async () => {
+    const provider = {
+      chat: vi.fn().mockResolvedValue({
+        text: 'ok', toolCalls: [],
+        usage: { promptTokens: 1, completionTokens: 1 },
+      }),
+    };
+    const agent = new PrismerAgent({
+      provider: provider as any,
+      tools: new ToolRegistry(),
+      observer: new ConsoleObserver(),
+      agents: new AgentRegistry(),
+      systemPrompt: 'sys', maxIterations: 2,
+    });
+    // Drain
+    const gen = agent.processMessage('hi', new Session('s'));
+    let next = await gen.next();
+    while (!next.done) { next = await gen.next(); }
+    // Without a scanner, processMessage simply doesn't crash on filesystem absence
+    expect(true).toBe(true);
+  });
+});

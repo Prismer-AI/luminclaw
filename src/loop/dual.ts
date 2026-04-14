@@ -9,6 +9,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { PrismerAgent } from '../agent.js';
+import { FsDirectiveScanner } from '../agent-fs-directive-scanner.js';
 import { EventBus } from '../sse.js';
 import { SessionStore, Session } from '../session.js';
 import { ConsoleObserver } from '../observer.js';
@@ -431,6 +432,7 @@ export class DualLoopAgent implements IAgentLoop {
       maxIterations: (inputCfg.maxIterations as number) ?? cfg.agent.maxIterations,
       agentId: 'researcher',
       workspaceDir,
+      directiveScanner: new FsDirectiveScanner(workspaceDir, innerBus, observer),
       onIterationStart: async (iteration, sessionArg) => {
         // A5: Drain MessageQueue for this task and inject as user messages.
         const drained = this.messageQueue.drainForTask(task.id);
