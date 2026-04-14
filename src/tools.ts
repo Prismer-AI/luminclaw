@@ -9,6 +9,7 @@
  */
 
 import type { ToolSpec } from './provider.js';
+import type { ToolPermissionContext, PermissionResult } from './permissions.js';
 
 // ── Interfaces ───────────────────────────────────────────
 
@@ -44,6 +45,20 @@ export interface Tool {
    * given arguments). Defaults to `false` (serial) when not provided.
    */
   isConcurrencySafe?(args: Record<string, unknown>): boolean;
+
+  /**
+   * If true, this tool needs a human user present (e.g., to approve a dialog).
+   * In headless / dual-loop / channel contexts where no human can respond,
+   * the tool should be auto-denied.  Default: false.
+   */
+  requiresUserInteraction?(): boolean;
+
+  /**
+   * Called before tool execution. Returns whether to allow, ask the user,
+   * or deny.  If omitted, default policy applies (allow in non-default
+   * modes, ask if requiresUserInteraction in default mode).
+   */
+  checkPermissions?(input: unknown, ctx: ToolPermissionContext): Promise<PermissionResult>;
 }
 
 // ── Tool Registry ────────────────────────────────────────

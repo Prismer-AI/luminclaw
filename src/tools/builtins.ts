@@ -43,6 +43,7 @@ const readFileTool: Tool = {
     },
     required: ['path'],
   },
+  requiresUserInteraction: () => false,
   async execute(args, ctx) {
     const filePath = safePath(args.path as string, ctx.workspaceDir);
     const content = fs.readFileSync(filePath, 'utf8');
@@ -68,6 +69,7 @@ const writeFileTool: Tool = {
     },
     required: ['path', 'content'],
   },
+  requiresUserInteraction: () => true,
   async execute(args, ctx) {
     const filePath = safePath(args.path as string, ctx.workspaceDir);
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -127,6 +129,7 @@ const listFilesTool: Tool = {
       maxDepth: { type: 'number', description: 'Max directory depth (default: 10)' },
     },
   },
+  requiresUserInteraction: () => false,
   async execute(args, ctx) {
     const dirPath = safePath((args.path as string) ?? '.', ctx.workspaceDir);
     const maxDepth = (args.maxDepth as number) ?? 10;
@@ -159,6 +162,7 @@ const editFileTool: Tool = {
     },
     required: ['path', 'old_string', 'new_string'],
   },
+  requiresUserInteraction: () => true,
   async execute(args, ctx) {
     const filePath = safePath(args.path as string, ctx.workspaceDir);
     const content = fs.readFileSync(filePath, 'utf8');
@@ -243,6 +247,7 @@ const grepTool: Tool = {
     },
     required: ['pattern'],
   },
+  requiresUserInteraction: () => false,
   async execute(args, ctx) {
     const searchPath = safePath((args.path as string) ?? '.', ctx.workspaceDir);
     const maxResults = (args.maxResults as number) ?? 50;
@@ -294,6 +299,7 @@ const webFetchTool: Tool = {
     },
     required: ['url'],
   },
+  requiresUserInteraction: () => false,
   async execute(args, ctx) {
     const url = args.url as string;
     const method = (args.method as string) ?? 'GET';
@@ -334,6 +340,7 @@ const thinkTool: Tool = {
     },
     required: ['thought'],
   },
+  requiresUserInteraction: () => false,
   async execute() {
     return 'Thought recorded.';
   },
@@ -352,7 +359,7 @@ const thinkTool: Tool = {
  * pitfalls; honors `ctx.abortSignal` both pre- and post-execution.
  */
 export function createBashTool(workspaceDir: string): Tool {
-  return createTool(
+  const tool = createTool(
     'bash',
     'Execute a bash command in the container. Use for file operations, package installation, and system commands.',
     {
@@ -392,6 +399,8 @@ export function createBashTool(workspaceDir: string): Tool {
       }
     },
   );
+  tool.requiresUserInteraction = () => true;
+  return tool;
 }
 
 /** All 7 built-in tools. */
