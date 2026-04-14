@@ -1,75 +1,78 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
-import * as os from 'node:os';
-import { DualLoopAgent } from '../../src/loop/dual.js';
+/**
+ * DualLoopAgent — disk persistence (real LLM).
+ *
+ * Rewritten per `no_mock_for_agent_infra`. The real inner loop's disk-write
+ * behaviour is exercised end-to-end: metadata + user turn at creation, status
+ * turn on terminal transition.
+ */
+import { it, expect } from 'vitest';
 import { EventBus } from '../../src/sse.js';
-import { readMeta, readTranscript, writeMeta } from '../../src/task/disk.js';
-import { resetConfig } from '../../src/config.js';
+import { readMeta, readTranscript } from '../../src/task/disk.js';
+import { describeReal, useRealLLMWorkspace, waitUntil, waitUntilTerminal } from '../helpers/real-llm.js';
 
-describe('DualLoopAgent — disk persistence', () => {
-  let tmpWorkspace: string;
-
-  beforeEach(async () => {
-    tmpWorkspace = await fs.mkdtemp(path.join(os.tmpdir(), 'lumin-persist-'));
-    process.env.WORKSPACE_DIR = tmpWorkspace;
-    resetConfig();
-  });
-
-  afterEach(async () => {
-    delete process.env.WORKSPACE_DIR;
-    resetConfig();
-    await fs.rm(tmpWorkspace, { recursive: true, force: true });
-  });
+describeReal('DualLoopAgent — disk persistence (real LLM)', () => {
+  const env = useRealLLMWorkspace();
 
   it('writes metadata at task creation', async () => {
-    const agent = new DualLoopAgent();
-    vi.spyOn(agent as any, 'runInnerLoop').mockResolvedValue(undefined);
+    const agent = env.makeAgent();
+    const result = await agent.processMessage(
+      { content: 'Reply with the word ok.', sessionId: 's1' },
+      { bus: new EventBus() },
+    );
 
-    const result = await agent.processMessage({ content: 'hello', sessionId: 's1' }, { bus: new EventBus() });
+    // writeMeta is fire-and-forget — poll the disk until it lands.
+    const ok = await waitUntil(async () => {
+      const meta = await readMeta(env.dir(), 's1', result.taskId!);
+      return meta !== null;
+    }, 5_000, 50);
+    expect(ok).toBe(true);
 
-    // Wait for async disk write
-    await new Promise(r => setTimeout(r, 50));
-
-    const meta = await readMeta(tmpWorkspace, 's1', result.taskId!);
+    const meta = await readMeta(env.dir(), 's1', result.taskId!);
     expect(meta).not.toBeNull();
     expect(meta?.id).toBe(result.taskId);
-    expect(meta?.instruction).toBe('hello');
+    expect(meta?.instruction).toBe('Reply with the word ok.');
     expect(meta?.version).toBe(1);
-  });
+  }, 60_000);
 
   it('writes user-turn entry on task creation', async () => {
-    const agent = new DualLoopAgent();
-    vi.spyOn(agent as any, 'runInnerLoop').mockResolvedValue(undefined);
+    const agent = env.makeAgent();
+    const result = await agent.processMessage(
+      { content: 'Reply with the word ok.', sessionId: 's1' },
+      { bus: new EventBus() },
+    );
 
-    const result = await agent.processMessage({ content: 'hello', sessionId: 's1' }, { bus: new EventBus() });
-    await new Promise(r => setTimeout(r, 50));
+    await waitUntil(async () => {
+      const turns = await readTranscript(env.dir(), 's1', result.taskId!);
+      return turns.some(t => t.kind === 'user');
+    }, 5_000, 50);
 
-    const turns = await readTranscript(tmpWorkspace, 's1', result.taskId!);
+    const turns = await readTranscript(env.dir(), 's1', result.taskId!);
     const userTurn = turns.find(t => t.kind === 'user');
     expect(userTurn).toBeDefined();
-    expect(userTurn!.kind === 'user' && userTurn.content).toBe('hello');
-  });
+    expect(userTurn!.kind === 'user' && userTurn.content).toBe('Reply with the word ok.');
+  }, 60_000);
 
-  it('writes status turn on terminal transition', async () => {
-    const agent = new DualLoopAgent();
-    // Simulate a completion: mock runInnerLoop to transition state to completed
-    vi.spyOn(agent as any, 'runInnerLoop').mockImplementation(async function (this: any, task: any) {
-      task.status = 'completed';
-      // Call drainQueueOnTermination as real code would
-      this.drainQueueOnTermination(task.id, 'task_completed');
-      // Signal completion via metadata rewrite
-      await writeMeta(process.env.WORKSPACE_DIR!, task.sessionId, task.id, {
-        id: task.id, sessionId: task.sessionId, instruction: task.instruction,
-        status: 'completed', createdAt: task.createdAt, updatedAt: Date.now(),
-        endedAt: Date.now(), lastPersistedTurnOffset: 0, version: 1,
-      });
-    });
+  it('writes a terminal status turn when the task completes', async () => {
+    const agent = env.makeAgent();
+    const result = await agent.processMessage(
+      { content: 'Reply with the word ok and stop.', sessionId: 's2' },
+      { bus: new EventBus() },
+    );
+    const finalStatus = await waitUntilTerminal(agent, result.taskId!, 60_000);
+    expect(['completed', 'failed', 'killed']).toContain(finalStatus);
 
-    const result = await agent.processMessage({ content: 'x', sessionId: 's2' }, { bus: new EventBus() });
-    await new Promise(r => setTimeout(r, 100));
+    // Allow persistState fire-and-forget to flush.
+    await waitUntil(async () => {
+      const meta = await readMeta(env.dir(), 's2', result.taskId!);
+      return meta !== null && ['completed', 'failed', 'killed'].includes(meta.status);
+    }, 5_000, 50);
 
-    const meta = await readMeta(tmpWorkspace, 's2', result.taskId!);
-    expect(meta?.status).toBe('completed');
-  });
+    const meta = await readMeta(env.dir(), 's2', result.taskId!);
+    expect(meta).not.toBeNull();
+    expect(['completed', 'failed', 'killed']).toContain(meta!.status);
+
+    const turns = await readTranscript(env.dir(), 's2', result.taskId!);
+    const statusTurn = turns.find(t => t.kind === 'status' && ['completed', 'failed', 'killed'].includes((t as { status: string }).status));
+    expect(statusTurn).toBeDefined();
+  }, 90_000);
 });
