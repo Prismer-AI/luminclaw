@@ -38,6 +38,16 @@ const log = createLogger('loop:dual');
 /** Planning timeout — skip planning on slow LLM responses. */
 const PLANNING_TIMEOUT_MS = 5_000;
 
+/** Default eviction interval and max-age: 1 hour. */
+const DEFAULT_EVICTION_MS = 60 * 60 * 1_000;
+
+export interface DualLoopAgentOptions {
+  /** How often to run the eviction sweep (ms). Default: 3_600_000 (1h). */
+  evictionIntervalMs?: number;
+  /** Evict terminal tasks older than this age (ms). Default: 3_600_000 (1h). */
+  evictionMaxAgeMs?: number;
+}
+
 export class DualLoopAgent implements IAgentLoop {
   readonly mode: LoopMode = 'dual';
 
@@ -61,10 +71,26 @@ export class DualLoopAgent implements IAgentLoop {
    */
   private taskContexts = new Map<string, { abortController: AbortController; bus: EventBus }>();
 
-  constructor() {
+  /** Timer handle for the periodic eviction sweep. Null after shutdown. */
+  private evictionTimer: NodeJS.Timeout | null = null;
+
+  constructor(options: DualLoopAgentOptions = {}) {
     const cfg = loadConfig();
     this.memStore = new MemoryStore(cfg.workspace.dir);
     this.directiveRouter = new DirectiveRouter();
+
+    const intervalMs = options.evictionIntervalMs ?? DEFAULT_EVICTION_MS;
+    const maxAgeMs = options.evictionMaxAgeMs ?? DEFAULT_EVICTION_MS;
+    this.evictionTimer = setInterval(() => {
+      try {
+        const evicted = this.tasks.evictCompleted(maxAgeMs);
+        if (evicted > 0) log.info('evicted terminal tasks', { count: evicted });
+      } catch (err) {
+        log.warn('eviction tick failed', { error: String(err) });
+      }
+    }, intervalMs);
+    // Allow process to exit even if this timer is the only pending handle.
+    this.evictionTimer.unref?.();
   }
 
   /**
@@ -698,6 +724,10 @@ export class DualLoopAgent implements IAgentLoop {
   }
 
   async shutdown(): Promise<void> {
+    if (this.evictionTimer) {
+      clearInterval(this.evictionTimer);
+      this.evictionTimer = null;
+    }
     this.cancel();
     this.viewStack.clear();
     this.worldModel = null;
