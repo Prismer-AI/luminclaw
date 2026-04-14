@@ -63,9 +63,15 @@ const LEVEL_LABELS: Record<LogLevel, string> = {
 let resolvedLevel: number | null = null;
 let debugPatterns: RegExp[] | null = null;
 
+// Embedded-safe env access — JSC and other embed runtimes lack `process`.
+function readEnv(key: string): string | undefined {
+  if (typeof process === 'undefined' || !process?.env) return undefined;
+  return process.env[key];
+}
+
 function getMinLevel(): number {
   if (resolvedLevel === null) {
-    const env = (process.env.LOG_LEVEL || 'info').toLowerCase() as LogLevel;
+    const env = (readEnv('LOG_LEVEL') || 'info').toLowerCase() as LogLevel;
     resolvedLevel = LEVELS[env] ?? LEVELS.info;
   }
   return resolvedLevel;
@@ -73,7 +79,7 @@ function getMinLevel(): number {
 
 function getDebugPatterns(): RegExp[] {
   if (debugPatterns === null) {
-    const raw = process.env.DEBUG || '';
+    const raw = readEnv('DEBUG') || '';
     if (!raw) {
       debugPatterns = [];
     } else {

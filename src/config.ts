@@ -171,6 +171,11 @@ export type LuminConfig = z.infer<typeof LuminConfigSchema>;
  * This provides backward compatibility with all existing env vars.
  */
 function fromEnv(): Record<string, unknown> {
+  // Embedded-safe: JSC and other embed runtimes lack `process` entirely.
+  // Without this guard, loadConfig() crashes at module-load in agent.ts.
+  if (typeof process === 'undefined' || !process?.env) {
+    return {};
+  }
   const env = process.env;
   const raw: Record<string, unknown> = {};
 
