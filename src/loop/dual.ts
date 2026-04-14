@@ -231,11 +231,15 @@ export class DualLoopAgent implements IAgentLoop {
       lastPersistedTurnOffset: 0,
       version: 1,
     };
-    void writeMeta(persistWorkspaceDir, sessionId, taskId, initMeta)
-      .catch(e => log.warn('writeMeta failed', { taskId, error: String(e) }));
-    void appendTurn(persistWorkspaceDir, sessionId, taskId, {
-      kind: 'user', content: input.content, timestamp: task.createdAt,
-    }).catch(e => log.warn('appendTurn failed', { taskId, error: String(e) }));
+    this.trackBackground(
+      writeMeta(persistWorkspaceDir, sessionId, taskId, initMeta)
+        .catch(e => log.warn('writeMeta failed', { taskId, error: String(e) })),
+    );
+    this.trackBackground(
+      appendTurn(persistWorkspaceDir, sessionId, taskId, {
+        kind: 'user', content: input.content, timestamp: task.createdAt,
+      }).catch(e => log.warn('appendTurn failed', { taskId, error: String(e) })),
+    );
 
     // Recall previous world model facts from MemoryStore and seed knowledgeBase
     const newWorldModel = createWorldModel(taskId, input.content);
@@ -270,7 +274,7 @@ export class DualLoopAgent implements IAgentLoop {
     this.runInnerLoop(task, input, session, bus, abortController.signal).catch(err => {
       log.error('inner loop crashed', { taskId, error: err instanceof Error ? err.message : String(err) });
       try { this.stateMachine.fail(task, err instanceof Error ? err.message : String(err)); } catch { /* already terminal */ }
-      void this.persistState(task, err instanceof Error ? err.message : String(err));
+      this.trackBackground(this.persistState(task, err instanceof Error ? err.message : String(err)));
       // Drain any queued messages so callers see them surface as orphaned
       // rather than silently disappearing when the inner loop crashes.
       this.drainQueueOnTermination(task.id, 'task_aborted');
@@ -352,9 +356,18 @@ export class DualLoopAgent implements IAgentLoop {
         outerBus.publish({ type: 'task.planned' as const, data: { taskId: task.id, steps: planSteps } });
       }
 
-      // Transition to executing
+      // Task may have been cancelled (→ failed) during the planning LLM call.
+      // Only transition if still in planning status — avoids the documented
+      // "Invalid task transition: failed → executing" crash when shutdown
+      // fires between planning and execution.
+      if (task.status !== 'planning') {
+        log.debug('skipping planning→executing transition; task no longer in planning state', {
+          taskId: task.id, currentStatus: task.status,
+        });
+        return;
+      }
       this.stateMachine.transition(task, 'executing');
-      void this.persistState(task);
+      this.trackBackground(this.persistState(task));
 
       // Emit progress checkpoint (first run only)
       this.tasks.addCheckpoint(task.id, {
@@ -479,10 +492,10 @@ export class DualLoopAgent implements IAgentLoop {
 
       // Complete the task
       this.stateMachine.complete(task, result.text);
-      void this.persistState(task);
+      this.trackBackground(this.persistState(task));
 
       // E2: Persist knowledgeBase to MemoryStore for cross-task recall.
-      void this.persistKnowledgeBase(task.id).catch(() => { /* logged in helper */ });
+      this.trackBackground(this.persistKnowledgeBase(task.id).catch(() => { /* logged in helper */ }));
 
       // Drain any messages that arrived while the task was finishing — they
       // are orphaned because there is no active task to receive them.
@@ -520,7 +533,7 @@ export class DualLoopAgent implements IAgentLoop {
       }});
     } catch (err) {
       try { this.stateMachine.fail(task, err instanceof Error ? err.message : String(err)); } catch { /* already terminal */ }
-      void this.persistState(task, err instanceof Error ? err.message : String(err));
+      this.trackBackground(this.persistState(task, err instanceof Error ? err.message : String(err)));
       // Drain queued messages BEFORE emitting the error so subscribers see
       // orphan events alongside the failure.
       this.drainQueueOnTermination(task.id, 'task_aborted');
@@ -673,7 +686,7 @@ export class DualLoopAgent implements IAgentLoop {
 
     // Transition back to executing.
     this.stateMachine.transition(task, 'executing');
-    void this.persistState(task);
+    this.trackBackground(this.persistState(task));
 
     // Create new abortController + bus for the resumed task.
     const abortController = new AbortController();
@@ -691,7 +704,7 @@ export class DualLoopAgent implements IAgentLoop {
       .catch(err => {
         log.error('resumed inner loop crashed', { taskId, error: String(err) });
         try { this.stateMachine.fail(task, String(err)); } catch { /* already terminal */ }
-        void this.persistState(task, String(err));
+        this.trackBackground(this.persistState(task, String(err)));
         this.drainQueueOnTermination(taskId, 'task_aborted');
         this.taskContexts.delete(taskId);
       });
@@ -781,7 +794,7 @@ export class DualLoopAgent implements IAgentLoop {
       const task = this.tasks.get(id);
       if (task) {
         try { this.stateMachine.fail(task, `cancelled: ${reason}`); } catch { /* already terminal */ }
-        void this.persistState(task, `cancelled: ${reason}`);
+        this.trackBackground(this.persistState(task, `cancelled: ${reason}`));
         log.info('task cancelled', { taskId: id, reason });
         this.drainQueueOnTermination(id, 'task_aborted');
       }
@@ -810,12 +823,26 @@ export class DualLoopAgent implements IAgentLoop {
     }
   }
 
+  /** Set of in-flight fire-and-forget promises (disk writes, knowledge persistence).
+   *  Tracked so shutdown() can await them and avoid tmpdir-ENOENT races in tests. */
+  private pendingBackgroundWork = new Set<Promise<unknown>>();
+
+  private trackBackground(p: Promise<unknown>): void {
+    this.pendingBackgroundWork.add(p);
+    p.finally(() => this.pendingBackgroundWork.delete(p));
+  }
+
   async shutdown(): Promise<void> {
     if (this.evictionTimer) {
       clearInterval(this.evictionTimer);
       this.evictionTimer = null;
     }
     this.cancel();
+    // Wait for fire-and-forget disk writes to settle so tmpdir cleanup in
+    // tests doesn't race with late mkdir. allSettled to never throw.
+    if (this.pendingBackgroundWork.size > 0) {
+      await Promise.allSettled([...this.pendingBackgroundWork]);
+    }
     this.viewStack.clear();
     this.worldModel = null;
   }
