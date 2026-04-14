@@ -7,6 +7,10 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { createHash } from 'node:crypto';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import * as os from 'node:os';
+import { resetConfig } from '../src/config.js';
 
 // Since server.ts functions are not individually exported (module-scoped),
 // we test the WebSocket encoding/decoding logic and protocol behavior
@@ -408,5 +412,65 @@ describe('GET /v1/tasks/:id — progress field', () => {
       toolsUsed: ['bash'],   // preserved from first update
       lastActivity: 1500,
     });
+  });
+});
+
+// ── B4: server startup — re-register persisted tasks ────
+
+describe('server startup — re-register persisted tasks', () => {
+  it('re-registers non-terminal tasks as interrupted on startup', async () => {
+    const tmpWorkspace = await fs.mkdtemp(path.join(os.tmpdir(), 'lumin-startup-'));
+    try {
+      const { writeMeta } = await import('../src/task/disk.js');
+      await writeMeta(tmpWorkspace, 'sess', 'task-x', {
+        id: 'task-x', sessionId: 'sess', instruction: 'unfinished',
+        status: 'executing',
+        createdAt: 1, updatedAt: 2,
+        lastPersistedTurnOffset: 0, version: 1,
+      });
+
+      process.env.WORKSPACE_DIR = tmpWorkspace;
+      resetConfig();
+
+      const { DualLoopAgent } = await import('../src/loop/dual.js');
+      const agent = new DualLoopAgent();
+      await agent.loadPersistedTasks();
+
+      const task = agent.tasks.get('task-x');
+      expect(task).toBeDefined();
+      expect(task!.status).toBe('interrupted');
+    } finally {
+      delete process.env.WORKSPACE_DIR;
+      resetConfig();
+      await fs.rm(tmpWorkspace, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves terminal-status tasks as-is', async () => {
+    const tmpWorkspace = await fs.mkdtemp(path.join(os.tmpdir(), 'lumin-startup2-'));
+    try {
+      const { writeMeta } = await import('../src/task/disk.js');
+      await writeMeta(tmpWorkspace, 'sess', 'task-c', {
+        id: 'task-c', sessionId: 'sess', instruction: 'done',
+        status: 'completed',
+        createdAt: 1, updatedAt: 2, endedAt: 2,
+        lastPersistedTurnOffset: 0, version: 1,
+      });
+
+      process.env.WORKSPACE_DIR = tmpWorkspace;
+      resetConfig();
+
+      const { DualLoopAgent } = await import('../src/loop/dual.js');
+      const agent = new DualLoopAgent();
+      await agent.loadPersistedTasks();
+
+      const task = agent.tasks.get('task-c');
+      expect(task).toBeDefined();
+      expect(task!.status).toBe('completed');
+    } finally {
+      delete process.env.WORKSPACE_DIR;
+      resetConfig();
+      await fs.rm(tmpWorkspace, { recursive: true, force: true });
+    }
   });
 });

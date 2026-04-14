@@ -29,8 +29,9 @@ import { createLogger } from '../log.js';
 import type { IAgentLoop, LoopMode, AgentLoopInput, AgentLoopResult, AgentLoopCallOpts, Artifact } from './types.js';
 import type { WorldModel } from '../world-model/types.js';
 import type { Task } from '../task/types.js';
-import { appendTurn, writeMeta, type TaskMetadata } from '../task/disk.js';
+import { appendTurn, writeMeta, enumerateSessionTasks, type TaskMetadata } from '../task/disk.js';
 import { AbortReason, createAbortError, type AbortReasonValue } from '../abort.js';
+import type { TaskStatus } from '../task/types.js';
 
 const log = createLogger('loop:dual');
 
@@ -458,6 +459,42 @@ export class DualLoopAgent implements IAgentLoop {
     } catch (err) {
       log.warn('persistState failed', { taskId: task.id, error: String(err) });
     }
+  }
+
+  /**
+   * B4: Enumerate tasks persisted to disk from previous server runs and
+   * re-register them in the in-memory store.
+   *
+   * Non-terminal tasks (executing / paused / planning / pending) are marked
+   * `interrupted` — they cannot be automatically resumed without an explicit
+   * client action.  Terminal tasks (completed / failed / killed) are restored
+   * as-is so their results remain queryable.
+   */
+  async loadPersistedTasks(): Promise<void> {
+    const workspaceDir = loadConfig().workspace.dir;
+    const metas = await enumerateSessionTasks(workspaceDir);
+    for (const meta of metas) {
+      const restoredStatus: TaskStatus =
+        (['executing', 'paused', 'planning', 'pending'] as TaskStatus[]).includes(meta.status)
+          ? 'interrupted'
+          : meta.status;
+      this.tasks.create({
+        id: meta.id,
+        sessionId: meta.sessionId,
+        instruction: meta.instruction,
+        artifactIds: [],
+        status: restoredStatus,
+      });
+      this.tasks.update(meta.id, { status: restoredStatus, error: meta.error });
+      if (meta.iterations !== undefined) {
+        this.tasks.updateProgress(meta.id, {
+          iterations: meta.iterations,
+          toolsUsed: meta.toolsUsed ?? [],
+          lastActivity: meta.updatedAt,
+        });
+      }
+    }
+    log.info('loaded persisted tasks', { count: metas.length });
   }
 
   getTasks() {

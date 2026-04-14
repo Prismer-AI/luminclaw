@@ -596,6 +596,13 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   sharedLoop = createAgentLoop(serverCfg.agent.loopMode);
   log.info('agent loop initialised', { mode: sharedLoop.mode });
 
+  // B4: Re-register tasks persisted from prior server runs before accepting
+  // any new requests.  Non-terminal tasks become `interrupted`; terminal
+  // tasks are restored as-is so their results remain queryable.
+  if (sharedLoop.loadPersistedTasks) {
+    await sharedLoop.loadPersistedTasks();
+  }
+
   const server = createServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
     const path = url.pathname;

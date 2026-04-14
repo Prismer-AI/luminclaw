@@ -129,6 +129,18 @@ export interface IAgentLoop {
    */
   getTask?(id: string): { id: string; sessionId: string; instruction: string; status: string; artifactIds: string[]; checkpoints: unknown[]; result?: string; error?: string; createdAt: number; updatedAt: number } | undefined;
 
+  /**
+   * Re-register tasks that were persisted to disk in a previous server run.
+   *
+   * Should be called once at startup, before the server begins accepting
+   * requests.  Non-terminal tasks (pending / planning / executing / paused)
+   * are re-registered with status `interrupted`; terminal tasks
+   * (completed / failed / killed) keep their original status.
+   *
+   * Optional — single-loop implementations may omit this method.
+   */
+  loadPersistedTasks?(): Promise<void>;
+
   /** Graceful shutdown — wait for in-flight work to settle. */
   shutdown(): Promise<void>;
 }
