@@ -155,14 +155,5 @@ export async function loadWorkspaceToolsFromPlugin(
   }
 }
 
-/**
- * Create a tool from a simple definition (for built-in tools like bash).
- */
-export function createTool(
-  name: string,
-  description: string,
-  parameters: Record<string, unknown>,
-  execute: (args: Record<string, unknown>, ctx: ToolContext) => Promise<string>,
-): Tool {
-  return { name, description, parameters, execute };
-}
+// createTool has moved to ../tools.ts — re-export for backward compatibility.
+export { createTool } from '../tools.js';

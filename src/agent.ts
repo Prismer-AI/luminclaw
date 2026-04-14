@@ -289,6 +289,7 @@ export class PrismerAgent {
     events.push({ type: 'tool.start', data: { sessionId: session.id, tool: call.name, toolId: call.id, args: call.arguments } });
     const ctx: ToolContext = {
       workspaceDir: this.workspaceDir, sessionId: session.id, agentId: this.agentId,
+      abortSignal: this.abortSignal,
       emit: (event) => {
         if (event.type === 'directive') {
           session.addPendingDirective(event.data as unknown as Directive);

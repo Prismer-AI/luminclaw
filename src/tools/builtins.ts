@@ -294,18 +294,25 @@ const webFetchTool: Tool = {
     },
     required: ['url'],
   },
-  async execute(args) {
+  async execute(args, ctx) {
     const url = args.url as string;
     const method = (args.method as string) ?? 'GET';
     const headers = (args.headers as Record<string, string>) ?? {};
     const body = args.body as string | undefined;
     const maxBytes = (args.maxBytes as number) ?? 100_000;
 
+    // Combine the agent's abort signal with a 30s timeout so cancellation
+    // propagates to the underlying fetch().
+    const timeoutSignal = AbortSignal.timeout(30_000);
+    const signal = ctx.abortSignal
+      ? AbortSignal.any([ctx.abortSignal, timeoutSignal])
+      : timeoutSignal;
+
     const response = await fetch(url, {
       method,
       headers,
       body: body && method !== 'GET' ? body : undefined,
-      signal: AbortSignal.timeout(30_000),
+      signal,
     });
 
     const text = await response.text();

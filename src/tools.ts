@@ -17,7 +17,9 @@ export interface ToolContext {
   workspaceDir: string;
   sessionId: string;
   agentId: string;
-  emit: (event: ToolEvent) => void;
+  emit?: (event: ToolEvent) => void;
+  /** Abort signal propagated from the agent loop. Long-running tools should honor it. */
+  abortSignal?: AbortSignal;
 }
 
 /** Event emitted by a tool during execution via {@link ToolContext.emit}. */
@@ -130,4 +132,18 @@ export class ToolRegistry {
   get size(): number {
     return this.tools.size;
   }
+}
+
+// ── Helpers ──────────────────────────────────────────────
+
+/**
+ * Create a tool from a simple definition (for built-in tools like bash).
+ */
+export function createTool(
+  name: string,
+  description: string,
+  parameters: Record<string, unknown>,
+  execute: (args: Record<string, unknown>, ctx: ToolContext) => Promise<string>,
+): Tool {
+  return { name, description, parameters, execute };
 }

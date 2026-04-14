@@ -118,10 +118,14 @@ async function ensureInitialized(enabledModules?: string[]): Promise<{ tools: To
         },
         required: ['command'],
       },
-      async (cmdArgs) => {
+      async (cmdArgs, ctx) => {
+        if (ctx.abortSignal?.aborted) {
+          return '[Aborted before execution]';
+        }
         const { execSync } = await import('node:child_process');
         const cmd = cmdArgs.command as string;
         const timeout = (cmdArgs.timeout as number) ?? 30_000;
+        // TODO(C3-bash): execSync cannot be interrupted mid-run; promote to spawn for true mid-run abort support
         try {
           const output = execSync(cmd, {
             cwd: workspaceDir,
@@ -130,8 +134,14 @@ async function ensureInitialized(enabledModules?: string[]): Promise<{ tools: To
             maxBuffer: 1024 * 1024,
             env: { ...process.env, HOME: process.env.HOME || '/home/user' },
           });
+          if (ctx.abortSignal?.aborted) {
+            return '[Aborted after execution]';
+          }
           return output.slice(0, 10_000);
         } catch (err: unknown) {
+          if (ctx.abortSignal?.aborted) {
+            return '[Aborted after execution]';
+          }
           const e = err as { stderr?: string; message?: string };
           return `Error: ${e.stderr || e.message || String(err)}`.slice(0, 5_000);
         }
@@ -155,7 +165,7 @@ async function ensureInitialized(enabledModules?: string[]): Promise<{ tools: To
         const content = args.content as string;
         const tags = (args.tags as string[] | undefined) ?? [];
         await sharedMemory!.store(content, tags);
-        ctx.emit({ type: 'output', data: { action: 'store', preview: content.slice(0, 100) } });
+        ctx.emit?.({ type: 'output', data: { action: 'store', preview: content.slice(0, 100) } });
         return 'Memory stored successfully.';
       },
     ));
@@ -174,7 +184,7 @@ async function ensureInitialized(enabledModules?: string[]): Promise<{ tools: To
         const query = args.query as string;
         const result = await sharedMemory!.recall(query, (args.maxChars as number) ?? 4000);
         const resultCount = result ? result.split('\n\n').filter(Boolean).length : 0;
-        ctx.emit({ type: 'output', data: { action: 'recall', query, resultCount } });
+        ctx.emit?.({ type: 'output', data: { action: 'recall', query, resultCount } });
         return result || 'No matching memories found.';
       },
     ));
