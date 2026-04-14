@@ -14,7 +14,7 @@ import { SessionStore, Session } from '../session.js';
 import { ConsoleObserver } from '../observer.js';
 import { ToolRegistry } from '../tools.js';
 import { AgentRegistry, BUILTIN_AGENTS } from '../agents.js';
-import { loadWorkspaceToolsFromPlugin, createBashTool } from '../tools/index.js';
+import { loadWorkspaceToolsFromPlugin, createBashTool, createTool } from '../tools/index.js';
 import { OpenAICompatibleProvider, FallbackProvider, type Provider } from '../provider.js';
 import { InMemoryArtifactStore } from '../artifacts/memory.js';
 import { InMemoryTaskStore } from '../task/store.js';
@@ -314,6 +314,46 @@ export class DualLoopAgent implements IAgentLoop {
     // runtime shares the same abort-signal semantics as runAgent().
     const workspaceDir = cfg.workspace.dir;
     tools.register(createBashTool(workspaceDir));
+
+    // Memory tools — required for cross-task knowledge continuity (Phase E).
+    // Mirror the registrations in src/index.ts::ensureInitialized() so that
+    // the dual-loop inner executor has the same tool surface as runAgent().
+    const memStoreInstance = this.memStore;
+    tools.register(createTool(
+      'memory_store',
+      'Store a memory entry for later recall. Use to save important facts, decisions, code snippets, or action items.',
+      {
+        type: 'object',
+        properties: {
+          content: { type: 'string', description: 'The memory content to store' },
+          tags: { type: 'array', items: { type: 'string' }, description: 'Optional tags for categorization' },
+        },
+        required: ['content'],
+      },
+      async (args) => {
+        const content = args.content as string;
+        const tags = (args.tags as string[] | undefined) ?? [];
+        await memStoreInstance.store(content, tags);
+        return 'Memory stored successfully.';
+      },
+    ));
+    tools.register(createTool(
+      'memory_recall',
+      'Search stored memories by keywords. Returns relevant past entries sorted by relevance.',
+      {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Keywords to search for in memories' },
+          maxChars: { type: 'number', description: 'Max characters to return (default: 4000)' },
+        },
+        required: ['query'],
+      },
+      async (args) => {
+        const query = args.query as string;
+        const result = await memStoreInstance.recall(query, (args.maxChars as number) ?? 4000);
+        return result || 'No matching memories found.';
+      },
+    ));
 
     const agents = new AgentRegistry();
     agents.registerMany(BUILTIN_AGENTS);

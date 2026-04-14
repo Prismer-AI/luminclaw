@@ -200,3 +200,15 @@ followups:
   - Register memory_store and memory_recall in DualLoopAgent.runInnerLoop (src/loop/dual.ts ~L306) so the dual-loop inner executor has the same tool surface as runAgent()
   - Re-run C7 with a scenario that causes extractStructuredFacts to populate knowledgeBase (e.g., a task that outputs a file path or numeric fact) to verify Phase E's persistKnowledgeBase helper end-to-end
 ```
+
+## 6. Fix outcome
+
+Registers `memory_store` and `memory_recall` in `DualLoopAgent.runInnerLoop`'s tool registry, mirroring `src/index.ts::ensureInitialized()`. Cross-task knowledge continuity now works in dual-loop mode as it does in single-loop mode.
+
+### Changes
+
+- **`src/loop/dual.ts`**: Added `createTool` to the import from `../tools/index.js`. After the `createBashTool(workspaceDir)` registration block, registered `memory_store` and `memory_recall` using the canonical descriptions copied verbatim from `ensureInitialized()`. The instance `this.memStore` (already present on `DualLoopAgent`) is captured as `memStoreInstance` and used in the tool closures. (~40 lines added at lines 317–358.)
+
+- **`tests/loop/dual-tool-registry.test.ts`**: New test file. Uses `vi.mock('../../src/agent.js')` at the module level to intercept `PrismerAgent` construction and capture the `tools` argument. Calls `runInnerLoop` directly (bypassing `processMessage`) with a minimal task in `executing` state (skipping the planning LLM call). Asserts both `memory_store` and `memory_recall` are present in the registry. All 9 loop test files pass (24 tests).
+
+Re-run of the dual-mode scenario after the fix: [pending verification — fix lands first, re-measurement is a follow-up.]
