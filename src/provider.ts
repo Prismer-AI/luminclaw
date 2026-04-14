@@ -405,9 +405,11 @@ export class OpenAICompatibleProvider implements Provider {
     };
     if (msg.name) formatted.name = msg.name;
     if (msg.toolCallId) formatted.tool_call_id = msg.toolCallId;
-    // NOTE: reasoning_content is stored internally but NOT sent back to the API
-    // — many providers reject unknown properties on assistant messages.
     if (msg.toolCalls) formatted.tool_calls = msg.toolCalls;
+    // reasoning_content: required by Kimi K2 when tool_calls is present and
+    // thinking is enabled; tolerated by most OpenAI-compat providers since it
+    // was the OpenAI o1/o3 reasoning field shape. Pass it back when we have it.
+    if (msg.reasoningContent) formatted.reasoning_content = msg.reasoningContent;
     return formatted;
   }
 
