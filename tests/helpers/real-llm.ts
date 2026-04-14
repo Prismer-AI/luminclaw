@@ -106,13 +106,13 @@ export function useRealLLMWorkspace(): RealLLMWorkspaceHandle {
  * Wait until a predicate is true or timeout elapses. Yields control between
  * polls. Returns true if predicate held, false on timeout.
  */
-export async function waitUntil(pred: () => boolean, timeoutMs = 30_000, stepMs = 200): Promise<boolean> {
+export async function waitUntil(pred: () => boolean | Promise<boolean>, timeoutMs = 30_000, stepMs = 200): Promise<boolean> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    if (pred()) return true;
+    if (await pred()) return true;
     await new Promise(r => setTimeout(r, stepMs));
   }
-  return pred();
+  return await pred();
 }
 
 /** Wait until task has a terminal status. Returns the final status (or 'pending' on timeout). */
