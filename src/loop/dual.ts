@@ -212,52 +212,60 @@ export class DualLoopAgent implements IAgentLoop {
       : baseProvider;
 
     // ── Planning phase (optional, with timeout) ──
-    this.stateMachine.transition(task, 'planning');
-    outerBus.publish({ type: 'task.planning' as const, data: { taskId: task.id, goal: input.content.slice(0, 500) } });
+    // Skip planning when the task is already in 'executing' status — this
+    // happens on resume (resumeTask transitions interrupted → executing before
+    // dispatching runInnerLoop). Attempting to transition executing → planning
+    // is an invalid state-machine move and would throw InvalidTransitionError.
+    const isResume = task.status === 'executing';
 
     let planSteps: string[] = [];
-    try {
-      const planResult = await Promise.race([
-        provider.chat({
-          messages: [
-            { role: 'system', content: 'You are a planning assistant. Create a brief execution plan (3-5 steps) as a JSON array of strings. Return ONLY the JSON array, no other text.' },
-            { role: 'user', content: input.content },
-          ],
-          model,
-        }),
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), PLANNING_TIMEOUT_MS)),
-      ]);
+    if (!isResume) {
+      this.stateMachine.transition(task, 'planning');
+      outerBus.publish({ type: 'task.planning' as const, data: { taskId: task.id, goal: input.content.slice(0, 500) } });
 
-      if (planResult && planResult.text) {
-        try {
-          const parsed = JSON.parse(planResult.text.replace(/```json\n?|\n?```/g, '').trim());
-          if (Array.isArray(parsed)) planSteps = parsed.map(String).slice(0, 5);
-        } catch {
-          // LLM returned non-JSON — extract lines as steps
-          planSteps = planResult.text.split('\n').filter(l => l.trim()).slice(0, 5);
+      try {
+        const planResult = await Promise.race([
+          provider.chat({
+            messages: [
+              { role: 'system', content: 'You are a planning assistant. Create a brief execution plan (3-5 steps) as a JSON array of strings. Return ONLY the JSON array, no other text.' },
+              { role: 'user', content: input.content },
+            ],
+            model,
+          }),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), PLANNING_TIMEOUT_MS)),
+        ]);
+
+        if (planResult && planResult.text) {
+          try {
+            const parsed = JSON.parse(planResult.text.replace(/```json\n?|\n?```/g, '').trim());
+            if (Array.isArray(parsed)) planSteps = parsed.map(String).slice(0, 5);
+          } catch {
+            // LLM returned non-JSON — extract lines as steps
+            planSteps = planResult.text.split('\n').filter(l => l.trim()).slice(0, 5);
+          }
         }
+      } catch (err) {
+        log.warn('planning failed, skipping to execution', { error: err instanceof Error ? err.message : String(err) });
       }
-    } catch (err) {
-      log.warn('planning failed, skipping to execution', { error: err instanceof Error ? err.message : String(err) });
+
+      if (planSteps.length > 0) {
+        task.plan = planSteps;
+        outerBus.publish({ type: 'task.planned' as const, data: { taskId: task.id, steps: planSteps } });
+      }
+
+      // Transition to executing
+      this.stateMachine.transition(task, 'executing');
+      void this.persistState(task);
+
+      // Emit progress checkpoint (first run only)
+      this.tasks.addCheckpoint(task.id, {
+        id: randomUUID(),
+        type: 'progress',
+        message: planSteps.length > 0 ? `Planning complete: ${planSteps.length} steps identified` : 'Starting execution...',
+        requiresUserAction: false,
+        emittedAt: Date.now(),
+      });
     }
-
-    if (planSteps.length > 0) {
-      task.plan = planSteps;
-      outerBus.publish({ type: 'task.planned' as const, data: { taskId: task.id, steps: planSteps } });
-    }
-
-    // Transition to executing
-    this.stateMachine.transition(task, 'executing');
-    void this.persistState(task);
-
-    // Emit progress checkpoint
-    this.tasks.addCheckpoint(task.id, {
-      id: randomUUID(),
-      type: 'progress',
-      message: planSteps.length > 0 ? `Planning complete: ${planSteps.length} steps identified` : 'Starting execution...',
-      requiresUserAction: false,
-      emittedAt: Date.now(),
-    });
 
     // Build system prompt with handoff context
     let systemPrompt = `You are a research assistant executing a task.\n\nTask: ${input.content}`;
