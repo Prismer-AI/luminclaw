@@ -2,7 +2,7 @@
 
 ## Lumin — Runtime Mode Switching: Single-Loop / Dual-Loop
 
-> **Status**: Structural scaffolding implemented. Capability validation pending — see [`docs/superpowers/plans/2026-04-13-dual-loop-audit-and-roadmap.md`](./superpowers/plans/2026-04-13-dual-loop-audit-and-roadmap.md).
+> **Status**: Capability-validated against real LLM. Phase F tests C1, C3, C4, C5, C6, C7 all pass (6/6) — see [`tests/capability/dual-loop-capabilities.test.ts`](../tests/capability/dual-loop-capabilities.test.ts) and [`docs/superpowers/plans/2026-04-13-dual-loop-audit-and-roadmap.md`](./superpowers/plans/2026-04-13-dual-loop-audit-and-roadmap.md). C2 (mid-flight steering) not yet translated to an automated test. Run with `RUN_CAPABILITY_TESTS=1 npx vitest run tests/capability/`.
 > **Runtimes**: TypeScript (primary), Rust (core-parity — see §10 for divergences)
 > **Mode**: `LUMIN_LOOP_MODE=single` (default) | `dual`
 > **Tests**: TS 521, Rust 491, total 1,012 + stress 16
