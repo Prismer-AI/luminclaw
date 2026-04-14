@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { loadConfig, resetConfig, LuminConfigSchema, type LuminConfig } from '../src/config.js';
+import { loadConfig, resetConfig, LuminConfigSchema, createConfig, type LuminConfig } from '../src/config.js';
 
 describe('LuminConfigSchema defaults', () => {
   it('parses empty object with all defaults', () => {
@@ -175,5 +175,33 @@ describe('resetConfig', () => {
     // cleanup
     delete process.env.LUMIN_PORT;
     resetConfig();
+  });
+});
+
+describe('createConfig', () => {
+  const originalEnv = process.env;
+  beforeEach(() => { process.env = {}; });
+  afterEach(() => { process.env = originalEnv; });
+
+  it('produces a valid LuminConfig from overrides without reading process.env', () => {
+    const config = createConfig({
+      llm: { baseUrl: 'http://example.com/v1', apiKey: 'k', model: 'm' },
+      workspace: { dir: '/tmp/x', pluginPath: '' },
+    });
+    expect(config.llm.baseUrl).toBe('http://example.com/v1');
+    expect(config.llm.model).toBe('m');
+    expect(config.workspace.dir).toBe('/tmp/x');
+  });
+
+  it('applies schema defaults for omitted fields', () => {
+    const config = createConfig({ llm: { apiKey: 'x' } as any });
+    expect(config.agent).toBeDefined();
+    expect(config.session).toBeDefined();
+  });
+
+  it('does not read process.env even when set', () => {
+    process.env.OPENAI_API_KEY = 'env-key';
+    const config = createConfig({ llm: { apiKey: 'override' } as any });
+    expect(config.llm.apiKey).toBe('override');
   });
 });

@@ -307,3 +307,18 @@ export function loadConfig(overrides?: Record<string, unknown>): LuminConfig {
 export function resetConfig(): void {
   cached = null;
 }
+
+/**
+ * Pure config factory — Zod-parses an override object without reading
+ * process.env. Used by embedded runtimes (iOS, Android, Electron) that
+ * supply config explicitly.
+ *
+ * @example
+ * const cfg = createConfig({
+ *   llm: { baseUrl: 'http://example.com/v1', apiKey: 'k', model: 'm' },
+ *   workspace: { dir: '/tmp/foo', pluginPath: '' },
+ * });
+ */
+export function createConfig(overrides: Record<string, unknown> = {}): LuminConfig {
+  return LuminConfigSchema.parse(overrides);
+}
