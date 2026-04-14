@@ -15,10 +15,12 @@ describe('DualLoopAgent — cancel + termination drain', () => {
     const first = await agent.processMessage({ content: 'x', sessionId: 's' }, { bus: new EventBus() });
     agent.tasks.update(first.taskId!, { status: 'executing' });
 
-    // Capture reason via the private abortController BEFORE cancel nulls it out
-    const controller = (agent as unknown as { abortController: AbortController | null }).abortController;
-    agent.cancel(AbortReason.Timeout);
-    const reason = controller?.signal?.reason;
+    // Capture the per-task controller BEFORE cancel so we can inspect its signal.reason
+    const ctx = (agent as unknown as {
+      taskContexts: Map<string, { abortController: AbortController; bus: EventBus }>;
+    }).taskContexts.get(first.taskId!);
+    agent.cancel(first.taskId, AbortReason.Timeout);
+    const reason = ctx?.abortController.signal.reason;
     expect(reason).toBeDefined();
     expect(getAbortReason(reason)).toBe(AbortReason.Timeout);
   });

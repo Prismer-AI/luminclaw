@@ -93,9 +93,9 @@ export class SingleLoopAgent implements IAgentLoop {
   /**
    * No-op in single-loop mode.
    * Task cancellation is only meaningful in dual-loop mode (Phase 4).
-   * The `reason` parameter is accepted for interface parity and ignored.
+   * Both `taskId` and `reason` are accepted for interface parity and ignored.
    */
-  cancel(_reason?: AbortReasonValue): void {}
+  cancel(_taskId?: string, _reason?: AbortReasonValue): void {}
 
   async shutdown(): Promise<void> {}
 }

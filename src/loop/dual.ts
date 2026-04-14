@@ -14,7 +14,7 @@ import { SessionStore, Session } from '../session.js';
 import { ConsoleObserver } from '../observer.js';
 import { ToolRegistry } from '../tools.js';
 import { AgentRegistry, BUILTIN_AGENTS } from '../agents.js';
-import { loadWorkspaceToolsFromPlugin, createTool } from '../tools/index.js';
+import { loadWorkspaceToolsFromPlugin, createBashTool } from '../tools/index.js';
 import { OpenAICompatibleProvider, FallbackProvider, type Provider } from '../provider.js';
 import { InMemoryArtifactStore } from '../artifacts/memory.js';
 import { InMemoryTaskStore } from '../task/store.js';
@@ -49,8 +49,15 @@ export class DualLoopAgent implements IAgentLoop {
   readonly memStore: MemoryStore;
 
   private worldModel: WorldModel | null = null;
-  private activeBus: EventBus | null = null;
-  private abortController: AbortController | null = null;
+  /**
+   * Per-task runtime context. Keyed by taskId.
+   *
+   * Each concurrent task gets its own AbortController (so `cancel(taskId)`
+   * only interrupts the intended task) and its own EventBus reference (so
+   * messages queued against a running task can still reach the original
+   * WebSocket subscriber even when the enqueuing request supplied no bus).
+   */
+  private taskContexts = new Map<string, { abortController: AbortController; bus: EventBus }>();
 
   constructor() {
     const cfg = loadConfig();
@@ -63,14 +70,17 @@ export class DualLoopAgent implements IAgentLoop {
    * Resolves quickly with task metadata — result arrives via SSE events.
    */
   async processMessage(input: AgentLoopInput, opts?: AgentLoopCallOpts): Promise<AgentLoopResult> {
-    const bus = opts?.bus ?? new EventBus();
-    this.activeBus = bus;
-
     const sessionId = input.sessionId ?? `dual-${Date.now()}`;
 
     // A3: If this session has an active task, enqueue to it and return early.
     const existing = this.tasks.getActiveForSession(sessionId);
     if (existing) {
+      // Prefer the caller-supplied bus, but fall back to the bus the active
+      // task was created with so enqueue events still reach the original
+      // WebSocket subscriber when the enqueuing HTTP request supplies none.
+      const activeCtx = this.taskContexts.get(existing.id);
+      const bus = opts?.bus ?? activeCtx?.bus ?? new EventBus();
+
       const queued = this.messageQueue.enqueue(existing.id, input.content);
       bus.publish({
         type: 'task.message.enqueued' as const,
@@ -88,9 +98,11 @@ export class DualLoopAgent implements IAgentLoop {
     }
 
     // No active task — create one as before.
-    this.abortController = new AbortController();
+    const bus = opts?.bus ?? new EventBus();
+    const abortController = new AbortController();
     const session = this.sessions.getOrCreate(sessionId);
     const taskId = randomUUID();
+    this.taskContexts.set(taskId, { abortController, bus });
 
     // Create task
     const task = this.tasks.create({
@@ -136,9 +148,13 @@ export class DualLoopAgent implements IAgentLoop {
     bus.publish({ type: 'agent.start' as const, data: { sessionId, agentId: 'dual-loop' } });
 
     // Dispatch inner loop in background (fire-and-forget from caller's perspective)
-    this.runInnerLoop(task, input, session, bus, this.abortController.signal).catch(err => {
+    this.runInnerLoop(task, input, session, bus, abortController.signal).catch(err => {
       log.error('inner loop crashed', { taskId, error: err instanceof Error ? err.message : String(err) });
       try { this.stateMachine.fail(task, err instanceof Error ? err.message : String(err)); } catch { /* already terminal */ }
+      // Drain any queued messages so callers see them surface as orphaned
+      // rather than silently disappearing when the inner loop crashes.
+      this.drainQueueOnTermination(task.id, 'task_aborted');
+      this.taskContexts.delete(task.id);
       bus.publish({ type: 'error' as const, data: { message: `Task failed: ${err instanceof Error ? err.message : String(err)}` } });
     });
 
@@ -238,23 +254,10 @@ export class DualLoopAgent implements IAgentLoop {
       tools.registerMany(workspaceTools);
     } catch { /* plugin not available locally */ }
 
-    // Bash tool — container-sandboxed, uses execSync with explicit argv
+    // Bash tool — canonical factory from tools/builtins.ts so the dual-loop
+    // runtime shares the same abort-signal semantics as runAgent().
     const workspaceDir = cfg.workspace.dir;
-    tools.register(createTool(
-      'bash', 'Execute a bash command in the container',
-      { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] },
-      async (args) => {
-        const { execFileSync } = await import('node:child_process');
-        try {
-          return execFileSync('/bin/sh', ['-c', args.command as string], {
-            cwd: workspaceDir, timeout: 30_000, encoding: 'utf8', maxBuffer: 1024 * 1024,
-          }).slice(0, 10_000);
-        } catch (e: unknown) {
-          const err = e as { stderr?: string; message?: string };
-          return `Error: ${err.stderr || err.message || String(e)}`.slice(0, 5_000);
-        }
-      },
-    ));
+    tools.register(createBashTool(workspaceDir));
 
     const agents = new AgentRegistry();
     agents.registerMany(BUILTIN_AGENTS);
@@ -390,9 +393,15 @@ export class DualLoopAgent implements IAgentLoop {
         taskId: task.id,
       }});
     } catch (err) {
-      this.stateMachine.fail(task, err instanceof Error ? err.message : String(err));
+      try { this.stateMachine.fail(task, err instanceof Error ? err.message : String(err)); } catch { /* already terminal */ }
+      // Drain queued messages BEFORE emitting the error so subscribers see
+      // orphan events alongside the failure.
+      this.drainQueueOnTermination(task.id, 'task_aborted');
       outerBus.publish({ type: 'error' as const, data: { message: err instanceof Error ? err.message : String(err) } });
     } finally {
+      // Always release the per-task context, regardless of success/failure,
+      // so the map doesn't grow unbounded across runs.
+      this.taskContexts.delete(task.id);
       await observer.flush();
     }
   }
@@ -446,18 +455,45 @@ export class DualLoopAgent implements IAgentLoop {
     }
   }
 
-  cancel(reason: AbortReasonValue = AbortReason.UserExplicitCancel): void {
-    // Abort the inner loop via AbortSignal with structured reason.
-    // NOTE: we intentionally do NOT null out this.abortController here so
-    // callers (and tests) can still inspect signal.reason after cancel().
-    if (this.abortController) {
-      this.abortController.abort(createAbortError(reason));
+  /**
+   * Cancel a specific task (or the sole active task when taskId is omitted).
+   *
+   * Backwards-compat: callers that predate the multi-task model invoke
+   * `cancel(reason)` with no taskId. If exactly one task context exists, we
+   * cancel that. If multiple are active and no taskId is supplied, we log a
+   * warning and cancel ALL — surfacing the ambiguity rather than silently
+   * cancelling the "wrong" one.
+   */
+  cancel(taskId?: string, reason: AbortReasonValue = AbortReason.UserExplicitCancel): void {
+    // Resolve which contexts to cancel.
+    const targets: string[] = [];
+    if (taskId) {
+      if (this.taskContexts.has(taskId)) {
+        targets.push(taskId);
+      } else {
+        log.warn('cancel: taskId not found in taskContexts', { taskId });
+      }
+    } else if (this.taskContexts.size === 1) {
+      targets.push(this.taskContexts.keys().next().value as string);
+    } else if (this.taskContexts.size > 1) {
+      log.warn('cancel: no taskId supplied but multiple tasks are active; cancelling all', { count: this.taskContexts.size });
+      for (const id of this.taskContexts.keys()) targets.push(id);
     }
-    const active = this.tasks.getActive();
-    if (active) {
-      try { this.stateMachine.fail(active, `cancelled: ${reason}`); } catch { /* already terminal */ }
-      log.info('task cancelled', { taskId: active.id, reason });
-      this.drainQueueOnTermination(active.id, 'task_aborted');
+
+    for (const id of targets) {
+      const ctx = this.taskContexts.get(id);
+      if (!ctx) continue;
+      // Abort the inner loop via AbortSignal with structured reason.
+      ctx.abortController.abort(createAbortError(reason));
+      const task = this.tasks.get(id);
+      if (task) {
+        try { this.stateMachine.fail(task, `cancelled: ${reason}`); } catch { /* already terminal */ }
+        log.info('task cancelled', { taskId: id, reason });
+        this.drainQueueOnTermination(id, 'task_aborted');
+      }
+      // NOTE: we intentionally do NOT delete the taskContexts entry here;
+      // the runInnerLoop finally-block deletes it. Leaving it in place
+      // lets callers (and tests) still inspect signal.reason after cancel.
     }
   }
 
@@ -470,7 +506,7 @@ export class DualLoopAgent implements IAgentLoop {
   private drainQueueOnTermination(taskId: string, reason: 'task_completed' | 'task_aborted'): void {
     const drained = this.messageQueue.drainForTask(taskId);
     if (drained.length === 0) return;
-    const bus = this.activeBus;
+    const bus = this.taskContexts.get(taskId)?.bus;
     if (!bus) return;
     for (const m of drained) {
       bus.publish({

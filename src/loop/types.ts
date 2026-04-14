@@ -102,13 +102,18 @@ export interface IAgentLoop {
   resume(clarification: string): void;
 
   /**
-   * Cancel the active task.
+   * Cancel a task (or the sole active task if `taskId` is omitted).
+   *
    * Single-loop: no-op.
-   * Dual-loop: aborts the inner AbortController (carrying the structured
-   * {@link AbortReasonValue}) and drains any queued messages as orphans.
-   * Defaults to `user_explicit_cancel` when no reason is supplied.
+   *
+   * Dual-loop: aborts the target task's AbortController (carrying the
+   * structured {@link AbortReasonValue}) and drains its queued messages as
+   * orphans.  If `taskId` is omitted and exactly one task is tracked, that
+   * task is cancelled (backwards-compat for pre-multi-task callers).  If
+   * omitted and multiple tasks are active, ALL are cancelled with a warning
+   * logged.  Defaults to `user_explicit_cancel` when no reason is supplied.
    */
-  cancel(reason?: AbortReasonValue): void;
+  cancel(taskId?: string, reason?: AbortReasonValue): void;
 
   /**
    * Return all tasks from the task store (if available).

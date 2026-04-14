@@ -164,16 +164,18 @@ describe('DualLoopAgent', () => {
 
   it('cancel fails active task', async () => {
     const { DualLoopAgent } = await import('../src/loop/dual.js');
+    const { EventBus } = await import('../src/sse.js');
     const agent = new DualLoopAgent();
 
-    // Create a task manually for cancel test
-    const task = agent.tasks.create({
-      id: 'cancel-test',
-      sessionId: 's1',
-      instruction: 'test',
-      artifactIds: [],
-      status: 'pending',
-    });
+    // Stub runInnerLoop so the task stays executing instead of actually running
+    const { vi } = await import('vitest');
+    vi.spyOn(agent as unknown as { runInnerLoop: () => Promise<void> }, 'runInnerLoop')
+      .mockImplementation(async () => {
+        await new Promise(r => setTimeout(r, 500));
+      });
+
+    const result = await agent.processMessage({ content: 'test', sessionId: 's1' }, { bus: new EventBus() });
+    const task = agent.tasks.get(result.taskId!)!;
     agent.stateMachine.transition(task, 'executing');
 
     agent.cancel();

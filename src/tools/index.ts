@@ -15,4 +15,4 @@ export {
 
 export { createClawHubTool } from './clawhub.js';
 
-export { BUILTIN_TOOLS, getBuiltinTools, safePath } from './builtins.js';
+export { BUILTIN_TOOLS, getBuiltinTools, safePath, createBashTool } from './builtins.js';

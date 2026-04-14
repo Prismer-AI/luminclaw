@@ -18,7 +18,7 @@ import { ConsoleObserver } from './observer.js';
 import { EventBus, StdoutSSEWriter } from './sse.js';
 import { SessionStore } from './session.js';
 import { writeOutput, type InputMessage } from './ipc.js';
-import { loadWorkspaceToolsFromPlugin, createTool, createClawHubTool, getBuiltinTools, type WorkspacePluginConfig } from './tools/index.js';
+import { loadWorkspaceToolsFromPlugin, createTool, createClawHubTool, getBuiltinTools, createBashTool, type WorkspacePluginConfig } from './tools/index.js';
 import { PromptBuilder } from './prompt.js';
 import { SkillLoader } from './skills.js';
 import { MemoryStore } from './memory.js';
@@ -105,48 +105,11 @@ async function ensureInitialized(enabledModules?: string[]): Promise<{ tools: To
     sharedTools.registerMany(builtins);
     log.debug('built-in tools registered', { count: builtins.length, skipped: pluginNames.size > 0 ? [...pluginNames].filter(n => ['read_file', 'write_file', 'list_files', 'edit_file', 'grep', 'web_fetch', 'think'].includes(n)) : [] });
 
-    // Bash — always available (sandboxed by container isolation)
+    // Bash — always available (sandboxed by container isolation).
+    // Canonical bash tool factory shared with DualLoopAgent so that abort
+    // semantics stay consistent across single- and dual-loop runtimes.
     const workspaceDir = cfg.workspace.dir;
-    sharedTools.register(createTool(
-      'bash',
-      'Execute a bash command in the container. Use for file operations, package installation, and system commands.',
-      {
-        type: 'object',
-        properties: {
-          command: { type: 'string', description: 'The bash command to execute' },
-          timeout: { type: 'number', description: 'Timeout in ms (default: 30000)' },
-        },
-        required: ['command'],
-      },
-      async (cmdArgs, ctx) => {
-        if (ctx.abortSignal?.aborted) {
-          return '[Aborted before execution]';
-        }
-        const { execSync } = await import('node:child_process');
-        const cmd = cmdArgs.command as string;
-        const timeout = (cmdArgs.timeout as number) ?? 30_000;
-        // TODO(C3-bash): execSync cannot be interrupted mid-run; promote to spawn for true mid-run abort support
-        try {
-          const output = execSync(cmd, {
-            cwd: workspaceDir,
-            timeout,
-            encoding: 'utf8',
-            maxBuffer: 1024 * 1024,
-            env: { ...process.env, HOME: process.env.HOME || '/home/user' },
-          });
-          if (ctx.abortSignal?.aborted) {
-            return '[Aborted after execution]';
-          }
-          return output.slice(0, 10_000);
-        } catch (err: unknown) {
-          if (ctx.abortSignal?.aborted) {
-            return '[Aborted after execution]';
-          }
-          const e = err as { stderr?: string; message?: string };
-          return `Error: ${e.stderr || e.message || String(err)}`.slice(0, 5_000);
-        }
-      },
-    ));
+    sharedTools.register(createBashTool(workspaceDir));
 
     // Memory — file-based persistent memory
     sharedMemory = new MemoryStore(workspaceDir);

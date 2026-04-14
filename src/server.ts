@@ -325,9 +325,8 @@ async function handleGetTask(req: IncomingMessage, res: ServerResponse, taskId: 
  *
  * Body (optional): `{ "reason": "user_explicit_cancel" | "user_interrupted" | "timeout" | "sibling_error" | "server_shutdown" }`
  *
- * Limitation (v1): `IAgentLoop.cancel()` cancels the *active* task regardless
- * of the ID in the path; if the path's taskId does not match the active task
- * we return 409 Conflict. A future iteration may accept per-task cancel.
+ * Per-task cancellation: `IAgentLoop.cancel(taskId, reason)` targets the
+ * specific task in the path. If the task is not active we return 409 Conflict.
  */
 async function handleCancelTask(req: IncomingMessage, res: ServerResponse, taskId: string): Promise<void> {
   const loop = getLoop();
@@ -357,14 +356,13 @@ async function handleCancelTask(req: IncomingMessage, res: ServerResponse, taskI
     return;
   }
 
-  // Only cancel if the requested taskId is the one currently executing.
-  // Phase C's IAgentLoop.cancel() cancels the *active* task; no per-task targeting yet.
+  // Only cancel if the requested taskId is currently in an active state.
   if (task.status !== 'executing' && task.status !== 'planning' && task.status !== 'paused') {
     json(res, 409, { error: `Task ${taskId} is not active (status=${task.status}); nothing to cancel`, status: task.status });
     return;
   }
 
-  loop.cancel(reason);
+  loop.cancel(taskId, reason);
   log.info('task cancel requested', { taskId, reason });
   json(res, 200, { status: 'cancelled', taskId, reason });
 }

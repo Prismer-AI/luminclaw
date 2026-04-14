@@ -10,7 +10,7 @@
  * @module tools/builtins
  */
 
-import { type Tool, type ToolContext } from '../tools.js';
+import { type Tool, type ToolContext, createTool } from '../tools.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
@@ -340,6 +340,59 @@ const thinkTool: Tool = {
 };
 
 // ── Export ────────────────────────────────────────────────
+
+// ── bash (shared factory) ────────────────────────────────
+
+/**
+ * Create the canonical bash tool.
+ *
+ * Shared between `runAgent()` (single-loop) and `DualLoopAgent.runInnerLoop()`
+ * so that abort-signal propagation and argv handling stay consistent across
+ * both execution paths. Uses `execFileSync` + sh -c to avoid shell-quoting
+ * pitfalls; honors `ctx.abortSignal` both pre- and post-execution.
+ */
+export function createBashTool(workspaceDir: string): Tool {
+  return createTool(
+    'bash',
+    'Execute a bash command in the container. Use for file operations, package installation, and system commands.',
+    {
+      type: 'object',
+      properties: {
+        command: { type: 'string', description: 'The bash command to execute' },
+        timeout: { type: 'number', description: 'Timeout in ms (default: 30000)' },
+      },
+      required: ['command'],
+    },
+    async (cmdArgs, ctx) => {
+      if (ctx.abortSignal?.aborted) {
+        return '[Aborted before execution]';
+      }
+      const { execFileSync } = await import('node:child_process');
+      const cmd = cmdArgs.command as string;
+      const timeout = (cmdArgs.timeout as number) ?? 30_000;
+      // TODO(C3-bash): execFileSync cannot be interrupted mid-run; promote to spawn for true mid-run abort support
+      try {
+        const output = execFileSync('/bin/sh', ['-c', cmd], {
+          cwd: workspaceDir,
+          timeout,
+          encoding: 'utf8',
+          maxBuffer: 1024 * 1024,
+          env: { ...process.env, HOME: process.env.HOME || '/home/user' },
+        });
+        if (ctx.abortSignal?.aborted) {
+          return '[Aborted after execution]';
+        }
+        return output.slice(0, 10_000);
+      } catch (err: unknown) {
+        if (ctx.abortSignal?.aborted) {
+          return '[Aborted after execution]';
+        }
+        const e = err as { stderr?: string; message?: string };
+        return `Error: ${e.stderr || e.message || String(err)}`.slice(0, 5_000);
+      }
+    },
+  );
+}
 
 /** All 7 built-in tools. */
 export const BUILTIN_TOOLS: Tool[] = [
