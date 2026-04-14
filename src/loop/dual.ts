@@ -14,7 +14,13 @@ import { SessionStore, Session } from '../session.js';
 import { ConsoleObserver } from '../observer.js';
 import { ToolRegistry } from '../tools.js';
 import { AgentRegistry, BUILTIN_AGENTS } from '../agents.js';
-import { loadWorkspaceToolsFromPlugin, createBashTool, createTool } from '../tools/index.js';
+import {
+  loadWorkspaceToolsFromPlugin,
+  createBashTool,
+  createTool,
+  createEnterPlanModeTool,
+  createExitPlanModeTool,
+} from '../tools/index.js';
 import { OpenAICompatibleProvider, FallbackProvider, type Provider } from '../provider.js';
 import { InMemoryArtifactStore } from '../artifacts/memory.js';
 import { InMemoryTaskStore } from '../task/store.js';
@@ -358,6 +364,10 @@ export class DualLoopAgent implements IAgentLoop {
         return result || 'No matching memories found.';
       },
     ));
+
+    // Plan mode tools (D4) — mirror registrations in src/index.ts::ensureInitialized.
+    tools.register(createEnterPlanModeTool());
+    tools.register(createExitPlanModeTool());
 
     const agents = new AgentRegistry();
     agents.registerMany(BUILTIN_AGENTS);

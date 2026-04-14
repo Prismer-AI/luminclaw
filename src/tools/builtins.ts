@@ -11,6 +11,7 @@
  */
 
 import { type Tool, type ToolContext, createTool } from '../tools.js';
+import { enterPlanMode, exitPlanMode } from '../permissions.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
@@ -401,6 +402,47 @@ export function createBashTool(workspaceDir: string): Tool {
   );
   tool.requiresUserInteraction = () => true;
   return tool;
+}
+
+// ── enter_plan_mode / exit_plan_mode (D4) ────────────────────
+
+/**
+ * Enter plan mode — exploration & planning only. Flips
+ * `session.permissionContext` to `plan`, denying any tool whose
+ * `requiresUserInteraction()` returns true until ExitPlanMode runs.
+ */
+export function createEnterPlanModeTool(): Tool {
+  return {
+    name: 'enter_plan_mode',
+    description: 'Enter plan mode — exploration and planning only, no file writes or destructive ops.',
+    parameters: { type: 'object', properties: {} },
+    execute: async (_args, ctx) => {
+      const session = ctx.session;
+      if (!session) return 'Error: session not available';
+      session.permissionContext = enterPlanMode(session.permissionContext ?? { mode: 'default' });
+      return 'Plan mode entered. Read-only tools available; writes will be denied until ExitPlanMode.';
+    },
+    requiresUserInteraction: () => false,
+  };
+}
+
+/**
+ * Exit plan mode. Restores `permissionContext` to the `prePlanMode` that
+ * was recorded on entry (falling back to `default`).
+ */
+export function createExitPlanModeTool(): Tool {
+  return {
+    name: 'exit_plan_mode',
+    description: 'Exit plan mode and restore prior tool permissions.',
+    parameters: { type: 'object', properties: {} },
+    execute: async (_args, ctx) => {
+      const session = ctx.session;
+      if (!session) return 'Error: session not available';
+      session.permissionContext = exitPlanMode(session.permissionContext ?? { mode: 'plan' });
+      return `Plan mode exited. Now in mode: ${session.permissionContext.mode}.`;
+    },
+    requiresUserInteraction: () => false,
+  };
 }
 
 /** All 7 built-in tools. */

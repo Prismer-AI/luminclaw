@@ -18,7 +18,16 @@ import { ConsoleObserver } from './observer.js';
 import { EventBus, StdoutSSEWriter } from './sse.js';
 import { SessionStore } from './session.js';
 import { writeOutput, type InputMessage } from './ipc.js';
-import { loadWorkspaceToolsFromPlugin, createTool, createClawHubTool, getBuiltinTools, createBashTool, type WorkspacePluginConfig } from './tools/index.js';
+import {
+  loadWorkspaceToolsFromPlugin,
+  createTool,
+  createClawHubTool,
+  getBuiltinTools,
+  createBashTool,
+  createEnterPlanModeTool,
+  createExitPlanModeTool,
+  type WorkspacePluginConfig,
+} from './tools/index.js';
 import { PromptBuilder } from './prompt.js';
 import { SkillLoader } from './skills.js';
 import { MemoryStore } from './memory.js';
@@ -151,6 +160,11 @@ async function ensureInitialized(enabledModules?: string[]): Promise<{ tools: To
         return result || 'No matching memories found.';
       },
     ));
+
+    // Plan mode tools (D4) — gate destructive tools by flipping
+    // session.permissionContext to 'plan' until exit_plan_mode runs.
+    sharedTools.register(createEnterPlanModeTool());
+    sharedTools.register(createExitPlanModeTool());
 
     // Skills — load SKILL.md files and register ClawHub tool
     sharedSkillLoader = new SkillLoader();
