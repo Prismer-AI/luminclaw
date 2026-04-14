@@ -15,8 +15,25 @@
 
 import { z } from 'zod';
 import { createLogger } from './log.js';
+import { ABORT_ERROR_NAME } from './abort.js';
 
 const log = createLogger('provider');
+
+/**
+ * Translate a fetch-level abort (DOMException / Error with name 'AbortError')
+ * into the structured AbortError attached to the signal, if present.
+ * Non-abort errors pass through unchanged.
+ */
+function translateAbortError(err: unknown, signal?: AbortSignal): unknown {
+  const isAbortLike =
+    (typeof DOMException !== 'undefined' && err instanceof DOMException && err.name === ABORT_ERROR_NAME) ||
+    (err instanceof Error && err.name === ABORT_ERROR_NAME);
+  if (isAbortLike) {
+    const attached = signal?.reason;
+    if (attached instanceof Error) return attached;
+  }
+  return err;
+}
 
 // ── Schemas ──────────────────────────────────────────────
 
@@ -172,23 +189,27 @@ export class OpenAICompatibleProvider implements Provider {
     this.applyThinkingParams(body, model, request.thinkingLevel);
 
     const url = `${this.config.baseUrl}/chat/completions`;
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.config.apiKey}`,
-      },
-      body: JSON.stringify(body),
-      signal: request.signal ?? AbortSignal.timeout(300_000),
-    });
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.config.apiKey}`,
+        },
+        body: JSON.stringify(body),
+        signal: request.signal ?? AbortSignal.timeout(300_000),
+      });
 
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`Provider error ${res.status}: ${text.slice(0, 200)}`);
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`Provider error ${res.status}: ${text.slice(0, 200)}`);
+      }
+
+      const data = await res.json() as Record<string, unknown>;
+      return this.parseResponse(data);
+    } catch (err) {
+      throw translateAbortError(err, request.signal);
     }
-
-    const data = await res.json() as Record<string, unknown>;
-    return this.parseResponse(data);
   }
 
   async chatStream(request: ChatRequest, onDelta: (delta: string) => void, onThinkingDelta?: (delta: string) => void, onToolUse?: (toolCall: ToolCall) => void): Promise<ChatResponse> {
@@ -215,6 +236,7 @@ export class OpenAICompatibleProvider implements Provider {
     this.applyThinkingParams(body, model, request.thinkingLevel);
 
     const url = `${this.config.baseUrl}/chat/completions`;
+    try {
     const res = await fetch(url, {
       method: 'POST',
       headers: {
@@ -351,6 +373,9 @@ export class OpenAICompatibleProvider implements Provider {
       finishReason,
       usage,
     };
+    } catch (err) {
+      throw translateAbortError(err, request.signal);
+    }
   }
 
   /** Apply provider-specific thinking parameters */
