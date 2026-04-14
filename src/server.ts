@@ -36,6 +36,7 @@ import { VERSION } from './version.js';
 import { createAgentLoop, resolveLoopMode } from './loop/factory.js';
 import type { IAgentLoop } from './loop/types.js';
 import type { DualLoopAgent } from './loop/dual.js';
+import { AbortReason, type AbortReasonValue } from './abort.js';
 
 const log = createLogger('server');
 
@@ -319,6 +320,55 @@ async function handleGetTask(req: IncomingMessage, res: ServerResponse, taskId: 
   json(res, 200, task);
 }
 
+/**
+ * POST /v1/tasks/:id/cancel — cancel the active task with a structured AbortReason.
+ *
+ * Body (optional): `{ "reason": "user_explicit_cancel" | "user_interrupted" | "timeout" | "sibling_error" | "server_shutdown" }`
+ *
+ * Limitation (v1): `IAgentLoop.cancel()` cancels the *active* task regardless
+ * of the ID in the path; if the path's taskId does not match the active task
+ * we return 409 Conflict. A future iteration may accept per-task cancel.
+ */
+async function handleCancelTask(req: IncomingMessage, res: ServerResponse, taskId: string): Promise<void> {
+  const loop = getLoop();
+  const task = loop.getTask?.(taskId);
+  if (!task) {
+    json(res, 404, { error: `Task ${taskId} not found` });
+    return;
+  }
+
+  // Parse optional reason from body.
+  let reason: AbortReasonValue = AbortReason.UserExplicitCancel;
+  try {
+    const body = await readBody(req);
+    if (body.trim().length > 0) {
+      const parsed = JSON.parse(body) as { reason?: string };
+      if (parsed.reason) {
+        const valid = Object.values(AbortReason) as string[];
+        if (!valid.includes(parsed.reason)) {
+          json(res, 400, { error: `Invalid reason "${parsed.reason}"; expected one of ${valid.join(', ')}` });
+          return;
+        }
+        reason = parsed.reason as AbortReasonValue;
+      }
+    }
+  } catch (err) {
+    json(res, 400, { error: `Invalid JSON body: ${err instanceof Error ? err.message : String(err)}` });
+    return;
+  }
+
+  // Only cancel if the requested taskId is the one currently executing.
+  // Phase C's IAgentLoop.cancel() cancels the *active* task; no per-task targeting yet.
+  if (task.status !== 'executing' && task.status !== 'planning' && task.status !== 'paused') {
+    json(res, 409, { error: `Task ${taskId} is not active (status=${task.status}); nothing to cancel`, status: task.status });
+    return;
+  }
+
+  loop.cancel(reason);
+  log.info('task cancel requested', { taskId, reason });
+  json(res, 200, { status: 'cancelled', taskId, reason });
+}
+
 // ── WebSocket Handler ────────────────────────────────────
 
 function handleWebSocket(req: IncomingMessage, socket: import('node:net').Socket): void {
@@ -576,6 +626,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         await handleArtifacts(req, res);
       } else if (path === '/v1/tasks' && method === 'GET') {
         await handleListTasks(req, res);
+      } else if (path.startsWith('/v1/tasks/') && path.endsWith('/cancel') && method === 'POST') {
+        const taskId = path.slice('/v1/tasks/'.length, -'/cancel'.length);
+        await handleCancelTask(req, res, taskId);
       } else if (path.startsWith('/v1/tasks/') && method === 'GET') {
         const taskId = path.slice('/v1/tasks/'.length);
         await handleGetTask(req, res, taskId);
