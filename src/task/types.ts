@@ -10,7 +10,7 @@
 
 // ── Status ────────────────────────────────────────────────
 
-export type TaskStatus = 'pending' | 'planning' | 'executing' | 'paused' | 'completed' | 'failed';
+export type TaskStatus = 'pending' | 'planning' | 'executing' | 'paused' | 'completed' | 'failed' | 'interrupted';
 
 // ── Checkpoint ────────────────────────────────────────────
 

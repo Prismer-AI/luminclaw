@@ -43,6 +43,17 @@ describe('InMemoryTaskStore — Phase A additions', () => {
     });
   });
 
+  describe('interrupted status', () => {
+    it('getActiveForSession treats interrupted as NOT active', () => {
+      const store = new InMemoryTaskStore();
+      store.create({
+        id: 't1', sessionId: 's', instruction: 'x',
+        artifactIds: [], status: 'interrupted',
+      });
+      expect(store.getActiveForSession('s')).toBeUndefined();
+    });
+  });
+
   describe('updateProgress', () => {
     it('sets progress on a task', () => {
       store.create({

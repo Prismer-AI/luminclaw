@@ -9,12 +9,13 @@ import type { Task, TaskStatus, Checkpoint } from './types.js';
 // ── Valid Transitions ─────────────────────────────────────
 
 const VALID_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
-  pending:   ['planning', 'executing', 'failed'],
-  planning:  ['executing', 'failed'],
-  executing: ['paused', 'completed', 'failed'],
-  paused:    ['executing', 'failed'],
-  completed: [],
-  failed:    [],
+  pending:     ['planning', 'executing', 'failed'],
+  planning:    ['executing', 'failed'],
+  executing:   ['paused', 'completed', 'failed', 'interrupted'],
+  paused:      ['executing', 'failed', 'interrupted'],
+  completed:   [],
+  failed:      [],
+  interrupted: ['executing'],
 };
 
 // ── Errors ────────────────────────────────────────────────
