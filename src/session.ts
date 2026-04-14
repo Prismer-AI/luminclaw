@@ -13,6 +13,10 @@
 
 import type { Message, ContentBlock } from './provider.js';
 import type { ImageRef } from './ipc.js';
+import {
+  type ToolPermissionContext,
+  defaultPermissionContext,
+} from './permissions.js';
 
 // ── Types ────────────────────────────────────────────────
 
@@ -45,10 +49,18 @@ export class Session {
   readonly pendingDirectives: Directive[] = [];
   lastActivity: number = Date.now();
   compactionSummary: string | null = null;
+  /**
+   * Permission gating context (Phase D). Drives the agent's per-tool
+   * permission checks. Defaults to `{ mode: 'default' }`. The dual-loop
+   * runtime sets this to `{ mode: 'auto' }` since no human is present.
+   * Tools like EnterPlanMode / ExitPlanMode mutate this field.
+   */
+  permissionContext: ToolPermissionContext;
 
   constructor(id: string, parentId: string | null = null) {
     this.id = id;
     this.parentId = parentId;
+    this.permissionContext = defaultPermissionContext();
   }
 
   /** Build the message array for LLM call.

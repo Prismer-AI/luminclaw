@@ -10,6 +10,7 @@
 
 import type { ToolSpec } from './provider.js';
 import type { ToolPermissionContext, PermissionResult } from './permissions.js';
+import type { Session } from './session.js';
 
 // ── Interfaces ───────────────────────────────────────────
 
@@ -21,6 +22,12 @@ export interface ToolContext {
   emit?: (event: ToolEvent) => void;
   /** Abort signal propagated from the agent loop. Long-running tools should honor it. */
   abortSignal?: AbortSignal;
+  /**
+   * The owning session, when a tool is invoked through the agent loop.
+   * Tools that need to mutate session state (e.g., EnterPlanMode /
+   * ExitPlanMode flipping `permissionContext`) read this field.
+   */
+  session?: Session;
 }
 
 /** Event emitted by a tool during execution via {@link ToolContext.emit}. */

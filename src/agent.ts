@@ -23,6 +23,11 @@ import type { AgentConfig, AgentRegistry } from './agents.js';
 import type { EventBus, AgentEvent } from './sse.js';
 import type { HookRegistry, HookContext } from './hooks.js';
 import { Session, type Directive } from './session.js';
+import {
+  defaultPermissionContext,
+  type PermissionResult,
+  type ToolPermissionContext,
+} from './permissions.js';
 import { getAbortReason, AbortReason } from './abort.js';
 import { compactConversation, repairOrphanedToolResults, memoryFlushBeforeCompaction } from './compaction.js';
 import { microcompact } from './microcompact.js';
@@ -317,6 +322,47 @@ export class PrismerAgent {
       if (!hookResult.proceed) return { result: { id: call.id, output: '[Tool blocked by hook]', error: false }, events };
       Object.assign(call.arguments, hookResult.args);
     }
+
+    // D3: Permission gating. Consult Session.permissionContext before executing
+    // the tool. In headless/auto modes, tools marked requiresUserInteraction are
+    // auto-denied (no human present). In plan mode, write/destructive tools are
+    // denied. Tools may provide their own checkPermissions for finer-grained
+    // policy in default mode.
+    const tool = this.tools.get(call.name);
+    if (tool) {
+      const permCtx: ToolPermissionContext = session.permissionContext ?? defaultPermissionContext();
+      let permResult: PermissionResult | undefined;
+      if (permCtx.mode === 'bypass') {
+        permResult = { behavior: 'allow' };
+      } else if (permCtx.mode === 'plan') {
+        permResult = tool.requiresUserInteraction?.()
+          ? { behavior: 'deny', message: 'Plan mode: writes/destructive ops not allowed', reason: 'plan_mode' }
+          : { behavior: 'allow' };
+      } else if (permCtx.mode === 'auto') {
+        permResult = tool.requiresUserInteraction?.()
+          ? { behavior: 'deny', message: 'Headless mode: tools requiring user interaction are not available', reason: 'headless' }
+          : { behavior: 'allow' };
+      } else if (tool.checkPermissions) {
+        // default mode with explicit tool-provided policy
+        permResult = await tool.checkPermissions(call.arguments, permCtx);
+      }
+
+      if (permResult) {
+        if (permResult.behavior === 'deny') {
+          const denyMsg = `[Permission denied: ${permResult.message}]`;
+          this.observer.recordEvent({ type: 'tool_call_end', timestamp: Date.now(), data: { name: call.name, success: false, denied: true, reason: permResult.reason } });
+          events.push({ type: 'tool.end', data: { sessionId: session.id, tool: call.name, toolId: call.id, result: denyMsg } });
+          return { result: { id: call.id, output: denyMsg, error: false }, events };
+        }
+        if (permResult.behavior === 'ask') {
+          // Phase F+ will wire the ask/UI flow. For now we log and fall through
+          // to the existing approval gate below.
+          log.warn('permission check returned ask; treating as allow (Phase F+ will wire UI)', { tool: call.name, message: permResult.message });
+        }
+        // 'allow' falls through to the existing approval gate + execution below.
+      }
+    }
+
     if (this.needsApproval(call.name, call.arguments)) {
       const reason = `Tool "${call.name}" requires approval`;
       events.push({ type: 'tool.approval_required', data: { sessionId: session.id, tool: call.name, toolId: call.id, args: call.arguments, reason } });
@@ -330,6 +376,7 @@ export class PrismerAgent {
     const ctx: ToolContext = {
       workspaceDir: this.workspaceDir, sessionId: session.id, agentId: this.agentId,
       abortSignal: this.abortSignal,
+      session,
       emit: (event) => {
         if (event.type === 'directive') {
           session.addPendingDirective(event.data as unknown as Directive);

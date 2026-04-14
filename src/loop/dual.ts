@@ -129,6 +129,10 @@ export class DualLoopAgent implements IAgentLoop {
     const bus = opts?.bus ?? new EventBus();
     const abortController = new AbortController();
     const session = this.sessions.getOrCreate(sessionId);
+    // D3: Dual-loop runs headless — no human present to approve interactive
+    // tools. Setting `auto` mode makes the agent auto-deny any tool flagged
+    // with requiresUserInteraction(). Plan-mode tools can still flip this.
+    session.permissionContext = { mode: 'auto' };
     const taskId = randomUUID();
     this.taskContexts.set(taskId, { abortController, bus });
 
