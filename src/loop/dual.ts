@@ -22,7 +22,7 @@ import { MessageQueue } from '../task/message-queue.js';
 import { TaskStateMachine } from '../task/machine.js';
 import { DirectiveRouter } from './directive-router.js';
 import { AgentViewStack } from './view-stack.js';
-import { createWorldModel, buildHandoffContext, extractStructuredFacts, recordCompletion } from '../world-model/builder.js';
+import { createWorldModel, buildHandoffContext, extractStructuredFacts, recordCompletion, serializeKnowledgeBaseForMemory } from '../world-model/builder.js';
 import { MemoryStore } from '../memory.js';
 import { loadConfig } from '../config.js';
 import { createLogger } from '../log.js';
@@ -415,6 +415,9 @@ export class DualLoopAgent implements IAgentLoop {
       this.stateMachine.complete(task, result.text);
       void this.persistState(task);
 
+      // E2: Persist knowledgeBase to MemoryStore for cross-task recall.
+      void this.persistKnowledgeBase(task.id).catch(() => { /* logged in helper */ });
+
       // Drain any messages that arrived while the task was finishing — they
       // are orphaned because there is no active task to receive them.
       this.drainQueueOnTermination(task.id, 'task_completed');
@@ -461,6 +464,24 @@ export class DualLoopAgent implements IAgentLoop {
       // so the map doesn't grow unbounded across runs.
       this.taskContexts.delete(task.id);
       await observer.flush();
+    }
+  }
+
+  /**
+   * E2: Persist this task's WorldModel.knowledgeBase to MemoryStore so it can
+   * be recalled at the start of the next task. Best-effort — all errors are
+   * logged, nothing thrown.
+   */
+  private async persistKnowledgeBase(taskId: string): Promise<void> {
+    const wm = this.worldModel;
+    if (!wm || wm.taskId !== taskId || wm.knowledgeBase.length === 0) return;
+    const serialized = serializeKnowledgeBaseForMemory(wm.knowledgeBase);
+    if (!serialized) return;
+    try {
+      await this.memStore.store(serialized, ['world-model', `task:${taskId}`]);
+      log.info('persisted knowledgeBase to memory', { taskId, factCount: wm.knowledgeBase.length });
+    } catch (err) {
+      log.warn('persistKnowledgeBase failed', { taskId, error: String(err) });
     }
   }
 
