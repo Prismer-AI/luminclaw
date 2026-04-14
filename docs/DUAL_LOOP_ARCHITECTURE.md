@@ -5,8 +5,8 @@
 > **Status**: Capability-validated against real LLM. Phase F tests C1, C3, C4, C5, C6, C7 all pass (6/6) — see [`tests/capability/dual-loop-capabilities.test.ts`](../tests/capability/dual-loop-capabilities.test.ts) and [`docs/superpowers/plans/2026-04-13-dual-loop-audit-and-roadmap.md`](./superpowers/plans/2026-04-13-dual-loop-audit-and-roadmap.md). C2 (mid-flight steering) not yet translated to an automated test. Run with `RUN_CAPABILITY_TESTS=1 npx vitest run tests/capability/`.
 > **Runtimes**: TypeScript (primary), Rust (core-parity — see §10 for divergences)
 > **Mode**: `LUMIN_LOOP_MODE=single` (default) | `dual`
-> **Tests**: TS 521, Rust 491, total 1,012 + stress 16
-> **Rev**: 5 — Incorporates architecture review feedback (2026-03-23)
+> **Tests**: TS ~700, Rust 619, total ~1,319 + stress 16
+> **Rev**: 6 — Incorporates Phase A/B/C/D/E/F/G (2026-04-15)
 
 ---
 
@@ -19,17 +19,36 @@
 │  Synchronous: caller blocked until complete   │
 └──────────────────────────────────────────────┘
 
-┌──────────────────────────────────────────────┐
-│       Dual-Loop Mode (LUMIN_LOOP_MODE=dual)  │
-│                                              │
-│  Outer Loop (HIL):                           │
-│    user input → create Task → return quickly │
-│    artifact store, task state machine        │
-│                                              │
-│  Inner Loop (EL): background execution       │
-│    PrismerAgent → tools → checkpoints        │
-│    results via EventBus (chat.final)         │
-└──────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│       Dual-Loop Mode (LUMIN_LOOP_MODE=dual)                  │
+│                                                              │
+│  Outer Loop (HIL):                                           │
+│    POST /v1/chat → check active task for session             │
+│      ├── no active → create Task, spawn inner loop           │
+│      └── active    → enqueue on MessageQueue, return queued  │
+│    artifact store, task state machine (+ `interrupted`)      │
+│                                                              │
+│                    ┌──────────────────┐                      │
+│                    │  MessageQueue    │  (per DualLoopAgent) │
+│                    │  keyed by taskId │                      │
+│                    └────────┬─────────┘                      │
+│                             │ drained at iteration boundary  │
+│                             ▼                                │
+│  Inner Loop (EL): background execution                       │
+│    onIterationStart: drain queue → insert user messages      │
+│    PrismerAgent → tools → checkpoints                        │
+│    per iteration: emit task.progress                         │
+│    results via EventBus (chat.final / task.completed)        │
+│                                                              │
+│  Per-task context:                                           │
+│    taskContexts: Map<taskId, { abortController, bus }>       │
+│                                                              │
+│  Disk persistence (Phase B, TS only):                        │
+│    {workspaceDir}/.lumin/sessions/{sessionId}/tasks/         │
+│      {taskId}.meta.json    — task metadata                   │
+│      {taskId}.jsonl        — transcript (append-only)        │
+│    Re-registered as `interrupted` at server startup.         │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 Both modes conform to the same `IAgentLoop` interface. Server code (`server.ts` / `http.rs`) is mode-agnostic.
@@ -40,35 +59,56 @@ Both modes conform to the same `IAgentLoop` interface. Server code (`server.ts` 
 
 ### What's Implemented (TS + Rust)
 
-| Component | TS | Rust | Status |
-|-----------|:--:|:----:|--------|
+| Component | TS | Rust | Status / Notes |
+|-----------|:--:|:----:|----------------|
 | `IAgentLoop` interface | ✓ | ✓ | Both conform |
 | `SingleLoopAgent` → `PrismerAgent` | ✓ | ✓ | Full agent loop |
 | `DualLoopAgent` with background execution | ✓ | ✓ | `tokio::spawn` / fire-and-forget |
-| Task state machine (6 states, validated transitions) | ✓ | ✓ | Complete |
-| `InMemoryTaskStore` (CRUD, active detection) | ✓ | ✓ | Complete |
-| `InMemoryArtifactStore` (add, assign, filter) | ✓ | ✓ | Complete |
+| Task state machine (including `interrupted`) | ✓ | ✓ | 7 states in TS (adds `interrupted`, Phase B2) |
+| `InMemoryTaskStore` (CRUD, active detection) | ✓ | ✓ | — |
+| `InMemoryArtifactStore` (add, assign, filter) | ✓ | ✓ | — |
 | `WorldModel` (handoff context, fact extraction) | ✓ | ✓ | Regex path + measurement extraction |
 | `DirectiveRouter` (realtime/checkpoint/HIL routing) | ✓ | — | TS only |
 | `AgentViewStack` (multi-agent UI state) | ✓ | — | TS only |
 | `FallbackProvider` (retry + model chain) | ✓ | ✓ | 429/5xx retry, exponential backoff |
-| Session persistence (user input in history) | ✓ | ✓ | Fixed: user messages persisted |
+| Session persistence (user input in history) | ✓ | ✓ | User messages persisted |
 | Memory tools (`memory_store`, `memory_recall`) | ✓ | ✓ | File-based, keyword search |
 | HTTP `/v1/chat` (single + dual mode) | ✓ | ✓ | Same JSON schema (camelCase) |
 | WebSocket `/v1/stream` | ✓ | ✓ | Same event protocol |
 | `chat.final` emission from dual-loop | ✓ | ✓ | Background → EventBus → client |
 | Approval gates (sensitive tool confirmation) | ✓ | — | TS only |
+| **MessageQueue (Phase A1)** | ✓ | — | Process-global per `DualLoopAgent`, keyed by taskId |
+| **`onIterationStart` callback in PrismerAgent (Phase A4)** | ✓ | — | Drains queue at iteration boundary |
+| **Per-task `AbortController` (Phase A / C-review)** | ✓ | partial | Rust: iteration-boundary check only |
+| **Per-iteration `task.progress` event (Phase A5)** | ✓ | — | Data: `{taskId, iteration, toolsUsed, lastActivity}` |
+| **Disk persistence (JSONL + meta.json) (Phase B1)** | ✓ | — | `{workspaceDir}/.lumin/sessions/{sessionId}/tasks/` |
+| **`interrupted` task status (Phase B2)** | ✓ | — | Set on non-terminal tasks at restart |
+| **Server startup re-register persisted tasks (Phase B4)** | ✓ | — | `loadPersistedTasks()` in `startServer` |
+| **Resume endpoint + `resumeTask` (Phase B5)** | ✓ | — | `POST /v1/tasks/:id/resume` |
+| **`AbortReason` structured enum (Phase C1/C6)** | ✓ | ✓ | Wire-parity: snake_case serde |
+| **Abort propagation into LLM fetch (Phase C2)** | ✓ | — | `fetch(…, { signal })` |
+| **Abort-aware tool context (Phase C3)** | ✓ | — | `ToolContext.signal` |
+| **Synthetic `[Aborted: <reason>]` tool_result (Phase C4)** | ✓ | — | Filled for unresolved tool_calls |
+| **Termination drain of queued messages (Phase C5, Gap 3)** | ✓ | — | Emits `task.message.orphaned` |
+| **`POST /v1/tasks/:id/cancel` endpoint (Phase C7)** | ✓ | — | See §4.3 |
+| **`POST /v1/tasks/:id/resume` endpoint (Phase B5)** | ✓ | — | See §4.3 / B-series |
+| **PermissionMode + ToolPermissionContext (Phase D1/D3)** | ✓ | — | `src/permissions.ts` |
+| **`Tool.requiresUserInteraction` + `checkPermissions` (Phase D2)** | ✓ | — | Per-tool override |
+| **`enter_plan_mode` / `exit_plan_mode` tools (Phase D4)** | ✓ | — | Flip mode at runtime |
+| **Auto-deny in headless mode (Phase D3)** | ✓ | — | Default for dual-loop |
+| **WorldModel `knowledgeBase` persisted to MemoryStore (Phase E1/E2)** | ✓ | — | On task completion |
+| **TTL-based task eviction (Phase E3)** | ✓ | — | Replaces unbounded in-memory store |
+| **Capability test suite C1–C7 (Phase F)** | ✓ | — | `tests/capability/dual-loop-capabilities.test.ts` |
 
 ### What's Not Yet Implemented
 
 | Feature | Notes |
 |---------|-------|
-| Mid-execution pause/resume (clarification gates) | State machine supports it, not wired |
-| Sub-agent delegation (`spawn_agent`, `@mention`) | TS has `@mention` in single-loop only |
-| Cancellation (`AbortSignal`) | TS has basic cancel, Rust has `cancelled` flag — see §4.3 |
-| Multimodal content (`ContentBlock[]`) | TS only, Rust uses `Option<String>` |
-| Thinking level control (`thinkingLevel`) | TS only |
-| Channel adapters (Telegram, CloudIM) | TS implemented, Rust stubs |
+| Clarification-gate mid-iteration pause/resume | Different from Phase B resume (interrupted tasks). State machine supports `paused`, not wired. |
+| Sub-agent delegation in dual-loop | TS `@mention` works in single-loop only |
+| Multimodal `ContentBlock[]` in Rust | Rust uses `Option<String>`; image/file blocks downgraded |
+| `thinkingLevel` control in Rust | TS only |
+| Channel adapters in Rust (Telegram, CloudIM) | TS implemented, Rust stubs |
 | Directive file scanning | TS only |
 | ComponentSpec serialization (Level 1/2/3) | Design only |
 | PEP (Prismer Extension Protocol) | Design only |
@@ -171,54 +211,110 @@ POST /v1/chat { content, sessionId }
 
 Doom-loop and repetition thresholds are configurable via `AgentOptions` (`doomLoopThreshold`, `repetitionThreshold`). Defaults are empirical values that balance between premature termination and runaway loops.
 
-### 4.2 Dual-Loop
+### 4.2 Dual-Loop (Phase A–C)
 
 ```
 POST /v1/chat { content, sessionId }
   │
-  ├── Assign unassigned artifacts to new task
-  ├── Create Task (status: pending → executing)
-  ├── Create WorldModel for task
-  ├── Publish agent.start event
+  ├── active = getActiveForSession(sessionId)
   │
-  ├── Return immediately: { status: "success", response: "Task {id} created...", taskId: "{id}" }
+  ├── if active exists:
+  │     ├── messageQueue.enqueue(active.taskId, { content, messageId })
+  │     ├── bus.publish(task.message.enqueued)
+  │     └── Return: { status: "success", queued: true, taskId: active.taskId }
   │
-  └── Background (tokio::spawn / fire-and-forget):
-        ├── Build system prompt with handoff context
-        ├── Create fresh PrismerAgent
-        ├── Run inner loop (same as single-loop agent)
-        ├── On success:
-        │     ├── Complete task (status → completed)
-        │     ├── Publish task.completed event
-        │     └── Publish chat.final event (content, toolsUsed, taskId)
-        └── On error:
-              ├── Fail task (status → failed)
-              └── Publish error event
+  ├── else (create new task):
+  │     ├── Assign unassigned artifacts to new task
+  │     ├── Create Task (pending → executing)
+  │     ├── Create WorldModel for task
+  │     ├── taskContexts.set(taskId, { abortController, bus })
+  │     ├── Persist initial {taskId}.meta.json + first transcript entry (Phase B)
+  │     ├── bus.publish(task.created)
+  │     ├── Return: { status: "success", taskId, loopMode: "dual" }
+  │     │
+  │     └── Background (tokio::spawn / fire-and-forget):
+  │           ├── bus.publish(task.planning)
+  │           ├── (optional) planning LLM call → bus.publish(task.planned)
+  │           ├── Build system prompt with handoff context
+  │           ├── Create fresh PrismerAgent with:
+  │           │     - signal: taskContexts.get(taskId).abortController.signal
+  │           │     - onIterationStart: drain messageQueue → insert user msgs
+  │           │                         + bus.publish(task.progress)
+  │           ├── Run inner loop:
+  │           │     for each iteration:
+  │           │       ├── onIterationStart() — drain queue
+  │           │       ├── LLM call (signal-aware, Phase C2)
+  │           │       ├── tool execution (ToolContext.signal, Phase C3)
+  │           │       └── append to {taskId}.jsonl (Phase B1)
+  │           ├── On success:
+  │           │     ├── Complete task (→ completed)
+  │           │     ├── Persist knowledgeBase → MemoryStore (Phase E1/E2)
+  │           │     ├── drainQueueOnTermination(taskId, 'task_completed')
+  │           │     ├── bus.publish(task.completed)
+  │           │     └── bus.publish(chat.final)
+  │           └── On error / abort:
+  │                 ├── Fail task (→ failed, or keep `interrupted`)
+  │                 ├── Fill synthetic [Aborted: <reason>] tool_result (Phase C4)
+  │                 ├── drainQueueOnTermination(taskId, 'task_aborted')
+  │                 └── bus.publish(error)
+```
+
+**Startup (Phase B4):**
+
+```
+startServer()
+  └── sharedLoop.loadPersistedTasks()
+        └── enumerate {workspaceDir}/.lumin/sessions/*/tasks/*.meta.json
+              ├── terminal tasks (completed/failed/cancelled) → restored as-is
+              └── non-terminal tasks → re-registered with status: interrupted
+                    (requires explicit POST /v1/tasks/:id/resume to continue)
 ```
 
 **Client-side integration for dual-loop:**
 
-The caller should not rely on the HTTP response text for the task result. Instead:
-1. Read `taskId` from the immediate HTTP response
-2. Listen for `chat.final` or `task.completed` event on WebSocket with matching `taskId`
-3. If the WebSocket disconnects and reconnects, the client should query task status via `/health` or a future `/v1/tasks/:id` endpoint
+1. Read `taskId` + `queued` from the HTTP response.
+2. Listen for `task.progress`, `task.completed`, `chat.final` on WebSocket,
+   keyed by `taskId`.
+3. If the WebSocket disconnects and reconnects, poll `GET /v1/tasks/:id` to
+   recover task state and result.
+4. Post additional user messages to the same session — the server auto-routes
+   them to the active task's queue and emits `task.message.enqueued`.
 
-> **Known limitation**: There is currently no persistent event replay or task result polling endpoint. If the client is disconnected when `chat.final` fires, the result is lost. See §13 Known Limitations.
-
-### 4.3 Cancellation
+### 4.3 Cancellation (Phase C)
 
 ```
-Client calls cancel() / sends chat.cancel WS message
+Client sends POST /v1/tasks/:id/cancel { reason: "user_explicit_cancel" }
+  (or chat.cancel WebSocket message, legacy path)
   │
-  ├── TS: AbortSignal triggers at next iteration boundary (before LLM call)
-  │     → agent returns '[Cancelled]', bus emits chat.cancelled
+  ├── TS (full mid-execution abort):
+  │     ├── loop.cancel(taskId, reason)
+  │     ├── taskContexts.get(taskId).abortController.abort(reason)
+  │     ├── AbortSignal propagates into:
+  │     │     - LLM fetch (Phase C2)
+  │     │     - ToolContext.signal → tool implementations (Phase C3)
+  │     ├── Inner loop unwinds; unresolved tool_calls get [Aborted: <reason>]
+  │     │   tool_result (Phase C4)
+  │     ├── drainQueueOnTermination(taskId, 'task_aborted') (Phase C5)
+  │     └── Task status → cancelled (terminal); bus emits chat.cancelled
   │
-  └── Rust: cancelled Mutex flag set to true
-        → DualLoopAgent.cancel() also transitions active task → failed
-        → Inner loop does NOT currently check the flag mid-execution
+  └── Rust (iteration-boundary only):
+        ├── DualLoopAgent.cancel_with_reason(reason) sets Mutex<Option<AbortReason>>
+        ├── Inner loop checks the flag at the top of each iteration
+        │   (agent.rs:488-493) and returns Err(...) early. (Phase C6 wire-parity)
+        └── In-flight LLM call + current tool execution are NOT interruptible.
 ```
 
-> **Gap**: Rust inner loop does not poll the `cancelled` flag between iterations. A long-running Rust dual-loop task cannot be interrupted until the current LLM call + tool execution completes.
+**Mid-execution abort availability:**
+
+| | LLM fetch | Tool execution (normal) | Tool execution (`execFileSync` bash) |
+|-|:---------:|:-----------------------:|:------------------------------------:|
+| TS | ✓ (AbortSignal) | ✓ (ToolContext.signal) | ✗ (synchronous, non-interruptible) |
+| Rust | ✗ (boundary only) | ✗ (boundary only) | ✗ |
+
+> **Per Gate 1 = c**: the Rust-parity policy is "wire-schema parity only" for
+> abort — the structured `AbortReason` enum matches between TS and Rust via
+> snake_case serde, but runtime PARA (pause / abort / resume / ack) semantics
+> are TS-first and deferred to v2.0 in Rust.
 
 ---
 
@@ -283,6 +379,19 @@ Server → { type: "text.delta", delta: "..." }    (0..N)
 Server → { type: "tool.start", tool, toolId }    (0..N)
 Server → { type: "tool.end", tool, toolId, result }
 Server → { type: "chat.final", content, thinking, toolsUsed, sessionId }
+
+# Dual-loop additions (Phase A/B/C)
+Server → { type: "task.created",  data: { taskId, sessionId, instruction } }
+Server → { type: "task.planning", data: { taskId, goal } }
+Server → { type: "task.planned",  data: { taskId, steps: string[] } }
+Server → { type: "task.progress", data: { taskId, iteration, toolsUsed, lastActivity } }
+Server → { type: "task.message.enqueued",
+           data: { taskId, messageId, content } }          # content truncated to 500 chars
+Server → { type: "task.message.orphaned",
+           data: { taskId, messageId, content,
+                   reason: "task_completed" | "task_aborted" } }
+Server → { type: "task.completed",
+           data: { taskId, sessionId, result?, toolsUsed? } }
 ```
 
 ---
@@ -388,16 +497,27 @@ Both TS and Rust servers are started, identical requests are sent, structural eq
 
 ### Rust Divergences
 
-Rust implements **core agent loop parity** (single-loop, dual-loop, tools, sessions, memory, config, provider with fallback). The following TS-only capabilities are **not** in Rust:
+Rust implements **core agent loop parity** (single-loop, dual-loop, tools, sessions, memory, config, provider with fallback). Per the **TS-first / Rust-parity** policy (Gate 1 = c), advanced runtime features land TS-first and Rust tracks wire-schema parity only until v2.0.
 
-| Missing in Rust | Impact |
-|-----------------|--------|
-| `DirectiveRouter`, `AgentViewStack` | No directive routing by delivery mode |
-| Approval gates (`needsApproval`, `waitForApproval`) | **Security: sensitive tools execute without confirmation** |
-| `@mention` delegation, `delegate` tool | No sub-agent orchestration |
-| Multimodal `ContentBlock[]` in Message | Image/file content blocks silently downgraded to empty string |
-| `thinkingLevel` / `temperature` control | No per-request LLM parameter tuning |
-| Channel adapters (Telegram, CloudIM) | No messaging platform integration |
+| Capability | TS | Rust | Notes |
+|------------|:--:|:----:|-------|
+| `AbortReason` enum (wire format) | ✓ | ✓ | snake_case serde, parity verified |
+| `POST /v1/tasks/:id/cancel` with `reason` | ✓ | partial | Rust: iteration-boundary abort only |
+| Mid-execution abort into LLM fetch | ✓ | ✗ | TS: AbortSignal on `fetch` |
+| Mid-execution abort into tool context | ✓ | ✗ | TS: `ToolContext.signal` |
+| Synthetic `[Aborted: <reason>]` tool_result | ✓ | ✗ | Phase C4, TS only |
+| `PermissionMode` + per-tool policy | ✓ | ✗ | Phase D, TS only |
+| Plan-mode tools (`enter_plan_mode` / `exit_plan_mode`) | ✓ | ✗ | Phase D4 |
+| Disk persistence (`.lumin/sessions/.../tasks/*`) | ✓ | ✗ | Phase B1 |
+| Task resume (`POST /v1/tasks/:id/resume`) | ✓ | ✗ | Phase B5 |
+| MessageQueue routing mid-task | ✓ | ✗ | Phase A |
+| Termination drain / `task.message.orphaned` | ✓ | ✗ | Phase C5 |
+| Approval gates (`needsApproval`, `waitForApproval`) | ✓ | — | **Security: Rust tools execute without confirmation** |
+| `DirectiveRouter`, `AgentViewStack` | ✓ | — | No directive routing by delivery mode |
+| `@mention` delegation, `delegate` tool | ✓ | — | Single-loop only |
+| Multimodal `ContentBlock[]` in Message | ✓ | — | Rust uses `Option<String>` |
+| `thinkingLevel` / `temperature` control | ✓ | — | No per-request LLM parameter tuning |
+| Channel adapters (Telegram, CloudIM) | ✓ | — | Rust stubs |
 
 > **Security warning**: Rust runtime should not be used for untrusted tool execution in dual-loop mode until approval gates are implemented. In dual-loop mode, the inner loop executes tools autonomously without human confirmation.
 
@@ -444,33 +564,87 @@ See [docs/TEST_COVERAGE.md](./TEST_COVERAGE.md) for full breakdown.
 
 ## 13. Known Limitations
 
-### WorldModel is per-task, not persisted
+### Closed since Rev 5
 
-WorldModel is created fresh for each dual-loop task and discarded on completion. Extracted knowledge facts are not written to the persistent MemoryStore. This means **cross-task knowledge continuity does not exist in dual-loop mode** — each task starts with a blank WorldModel. This directly limits the value of sequential complex task chains where earlier discoveries inform later tasks.
+- ~~**WorldModel is per-task, not persisted**~~ — CLOSED by Phase E1/E2. `knowledgeBase` facts are written to MemoryStore on task completion.
+- ~~**In-memory stores have no eviction**~~ — CLOSED by Phase E3. TTL-based eviction lands for completed/failed/cancelled tasks.
+- ~~**Dual-loop result delivery is fire-and-forget**~~ — CLOSED. `GET /v1/tasks/:id` returns status + result; reconnecting clients can poll.
+- ~~**Dialogue cannot steer running tasks**~~ — CLOSED by Phase A. MessageQueue delivers dialogue-layer messages at the next iteration boundary; `POST /v1/chat` against an active session auto-routes to the existing task.
 
-**Mitigation path**: Write `knowledgeBase` facts to MemoryStore on task completion; reload via keyword recall on next task start (§12 item 2 in original design).
+### Still open
 
-### In-memory stores have no eviction
+**Rust has no PermissionMode / approval gates.** Per Gate 1 = c, runtime PARA semantics are deferred to v2.0 in Rust. Rust tools execute autonomously in dual-loop mode without human confirmation — do not use Rust runtime for untrusted tool execution.
 
-`InMemoryTaskStore` and `InMemoryArtifactStore` grow unbounded. A long-running server instance accumulating completed tasks will leak memory. `SessionStore` has idle-timeout cleanup (TS only), but task/artifact stores do not.
+**Rust has no disk persistence.** Phase B is TS-only. A Rust server restart loses all in-flight task state; no `interrupted` status, no resume.
 
-**Mitigation path**: Add TTL-based eviction for completed/failed tasks, or replace with persistent storage.
+**Rust cancellation is boundary-only.** `DualLoopAgent.cancel_with_reason` sets a `Mutex<Option<AbortReason>>` that the inner loop checks at the top of each iteration (agent.rs:488-493). In-flight LLM calls and synchronous tool execution continue until the current iteration yields. Per Gate 1 = c, mid-execution abort is TS-only.
 
-### Dual-loop result delivery is fire-and-forget
+**bash `execFileSync` cannot be aborted mid-execution.** Even in TS, the synchronous bash tool implementation cannot observe an `AbortSignal` once `execFileSync` has started — the process runs to completion (or kills on timeout) before the signal is checked. Flagged multiple times in review, open.
 
-When the inner loop completes, `chat.final` is published to the EventBus. If no subscriber is listening (client disconnected), the result is lost. There is no persistent event log, no retry, and no polling endpoint for task results.
+**Clarification-gate mid-iteration pause is not wired.** The task state machine has a `paused` state, but no runtime path transitions into it mid-iteration awaiting a user clarification. This is separate from Phase B resume (`interrupted` → rerun from disk); clarification pause means the inner loop halts between a tool call and its tool_result while waiting for a dialogue answer. Future work.
 
-**Mitigation path**: Add `GET /v1/tasks/:id` endpoint that returns task status + result from `InMemoryTaskStore`.
+**`IAgentLoop.cancel(taskId?)` has a v1 simplification.** See the JSDoc on `handleCancelTask` in `src/server.ts` for the current scope — broadly, the cancel endpoint targets the specified `taskId`, but the underlying loop's per-task cancellation is still being refined and may not distinguish siblings when multiple tasks are concurrent in future multi-task-per-session scenarios.
 
-### Rust cancellation is incomplete
+**Sub-agent delegation is single-loop only.** `@mention` works in the single-loop agent. Dual-loop sub-agent orchestration (`spawn_agent`, `agent_status`, `await_agent`) is future work (§12).
 
-The Rust `DualLoopAgent.cancel()` sets a `cancelled` flag and transitions the task to `failed`, but the inner loop does not check this flag between iterations. A running Rust inner loop continues until the current agent cycle naturally completes.
+---
 
-### Dialogue cannot steer running tasks
+## 14. Plan Mode & Permissions (Phase D)
 
-New messages create independent tasks rather than injecting into the currently-running task. The outer dialogue loop has no communication channel to the inner execution loop after spawn. This means the dual-loop does not provide the "interrupt/steer mid-flight" capability documented in the architecture overview. See audit doc §1.2 "Architectural Root Cause" and the companion design doc's Pattern 1 (Message Queue) for the architectural gap and proposed fix.
+Phase D introduces a **permission mode** system that gates sensitive tool
+execution per-task. It is the TS-side foundation for PARA (pause / abort /
+resume / ack) semantics.
 
-**Mitigation path**: Phase A of the improvement roadmap (`2026-04-13-dual-loop-audit-and-roadmap.md` §3) adds a process-global message queue that allows dialogue-layer messages to be enqueued for delivery to a running task at its next iteration boundary.
+### 14.1 `PermissionMode`
+
+Defined in `src/permissions.ts`:
+
+| Mode | Behavior |
+|------|----------|
+| `default` | Interactive: user is prompted on `requiresUserInteraction` tools |
+| `plan` | Plan mode: `requiresUserInteraction` tools are auto-denied; the agent must produce a plan rather than mutate state |
+| `auto` | Headless: `requiresUserInteraction` tools are auto-denied (this is dual-loop's default) |
+| `bypass` | All gates disabled (dangerous; local dev only) |
+
+Dual-loop mode defaults to `auto` so background tasks never block awaiting a user confirmation that never arrives.
+
+### 14.2 `Tool.requiresUserInteraction` + `checkPermissions`
+
+Every `Tool` may declare two permission hooks:
+
+```ts
+interface Tool {
+  // Coarse flag — if true, this tool is auto-denied in plan/auto modes unless
+  // checkPermissions overrides.
+  requiresUserInteraction?: boolean;
+
+  // Fine-grained override. Called with the current ToolPermissionContext;
+  // returns allow / deny with an optional reason string injected into the
+  // tool_result when denied.
+  checkPermissions?(ctx: ToolPermissionContext): { allow: boolean; reason?: string };
+}
+```
+
+The `ToolPermissionContext` carries the current `mode`, the `prePlanMode`
+(restored on `exit_plan_mode`), tool args, and session info.
+
+### 14.3 Plan-mode tools
+
+Two built-in tools flip the mode at runtime:
+
+- **`enter_plan_mode`** — saves `prePlanMode = mode`, sets `mode = 'plan'`. The
+  agent is expected to use this before producing a multi-step plan so it can
+  research read-only without accidentally mutating the workspace.
+- **`exit_plan_mode`** — restores `mode = prePlanMode` (or `default`). Normally
+  called after the agent has drafted the plan and is ready to execute.
+
+### 14.4 Transitional note
+
+The `PermissionMode` type currently lives in `src/permissions.ts`. Per
+`ReleasePlan-1.9.0.md` item D12, it will be replaced by a re-export from
+`@prismer/sandbox-runtime` once that package publishes. Consumers should import
+from `@prismer/agent-core` rather than directly from `./permissions.js` so the
+eventual swap is transparent.
 
 ---
 
