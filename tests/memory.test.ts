@@ -3,7 +3,8 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { MemoryStore, FileMemoryBackend } from '../src/memory.js';
+import { MemoryStore } from '../src/memory.js';
+import { FileMemoryBackend } from '../src/memory-file-backend.js';
 import type { MemoryBackend, MemorySearchResult } from '../src/memory.js';
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -14,7 +15,7 @@ let memory: MemoryStore;
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'lumin-memory-'));
-  memory = new MemoryStore(tmpDir);
+  memory = new MemoryStore(new FileMemoryBackend(tmpDir));
 });
 
 afterEach(() => {
@@ -74,7 +75,7 @@ describe('MemoryStore.recall', () => {
   });
 
   it('returns empty string when no memory directory exists', async () => {
-    const freshMemory = new MemoryStore('/nonexistent/path');
+    const freshMemory = new MemoryStore(new FileMemoryBackend('/nonexistent/path'));
     const result = await freshMemory.recall('anything');
     expect(result).toBe('');
   });
@@ -206,8 +207,8 @@ describe('FileMemoryBackend', () => {
 // ── MemoryStore facade (with mock backend) ────────────────
 
 describe('MemoryStore facade', () => {
-  it('string constructor creates FileMemoryBackend (backward compat)', () => {
-    const store = new MemoryStore('/tmp/test-workspace');
+  it('FileMemoryBackend constructor creates file backend', () => {
+    const store = new MemoryStore(new FileMemoryBackend('/tmp/test-workspace'));
     expect(store.backendName).toBe('file');
   });
 

@@ -32,6 +32,7 @@ import {
 import { PromptBuilder } from './prompt.js';
 import { SkillLoader } from './skills.js';
 import { MemoryStore } from './memory.js';
+import { FileMemoryBackend } from './memory-file-backend.js';
 import { loadConfig } from './config.js';
 import { createLogger } from './log.js';
 
@@ -122,7 +123,7 @@ async function ensureInitialized(enabledModules?: string[]): Promise<{ tools: To
     sharedTools.register(createBashTool(workspaceDir));
 
     // Memory — file-based persistent memory
-    sharedMemory = new MemoryStore(workspaceDir);
+    sharedMemory = new MemoryStore(new FileMemoryBackend(workspaceDir));
     sharedTools.register(createTool(
       'memory_store',
       'Store a memory entry for later recall. Use to save important facts, decisions, code snippets, or action items.',
@@ -398,8 +399,9 @@ export { type InputMessage, type OutputMessage, writeOutput, parseOutput, OUTPUT
 export { loadWorkspaceToolsFromPlugin, createTool, createClawHubTool, BUILTIN_TOOLS, getBuiltinTools } from './tools/index.js';
 export { PromptBuilder, type PromptSection } from './prompt.js';
 export { SkillLoader, type LoadedSkill, type SkillMeta } from './skills.js';
-export { MemoryStore, FileMemoryBackend } from './memory.js';
+export { MemoryStore } from './memory.js';
 export type { MemoryBackend, MemorySearchResult, MemoryCapabilities, MemorySearchOptions } from './memory.js';
+export { FileMemoryBackend } from './memory-file-backend.js';
 export { HookRegistry, type Hook, type HookType, type HookContext } from './hooks.js';
 export { ChannelManager } from './channels/manager.js';
 export type { ChannelAdapter, IncomingMessage as ChannelMessage } from './channels/types.js';

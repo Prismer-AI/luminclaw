@@ -29,6 +29,7 @@ import { tmpdir } from 'node:os';
 import { execSync } from 'node:child_process';
 import { OpenAICompatibleProvider } from '../src/provider.js';
 import { MemoryStore } from '../src/memory.js';
+import { FileMemoryBackend } from '../src/memory-file-backend.js';
 
 // ── Config ──
 
@@ -309,7 +310,7 @@ describe.skipIf(!isGatewayReachable())('LoCoMo Benchmark', () => {
 
   beforeAll(() => {
     tmpDir = mkdtempSync(join(tmpdir(), 'lumin-locomo-bench-'));
-    memoryStore = new MemoryStore(tmpDir);
+    memoryStore = new MemoryStore(new FileMemoryBackend(tmpDir));
     provider = new OpenAICompatibleProvider({
       baseUrl: BASE_URL,
       apiKey: API_KEY,

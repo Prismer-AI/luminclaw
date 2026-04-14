@@ -9,6 +9,7 @@
  */
 import { it, expect } from 'vitest';
 import { MemoryStore } from '../../src/memory.js';
+import { FileMemoryBackend } from '../../src/memory-file-backend.js';
 import { EventBus } from '../../src/sse.js';
 import { describeReal, useRealLLMWorkspace, waitUntil } from '../helpers/real-llm.js';
 
@@ -50,7 +51,7 @@ describeReal('Phase E — knowledge persistence (real LLM)', () => {
       .persistKnowledgeBase(taskId);
 
     // Fresh MemoryStore confirms the fact was persisted durably.
-    const memStore = new MemoryStore(env.dir());
+    const memStore = new MemoryStore(new FileMemoryBackend(env.dir()));
     const recalled = await memStore.recall('config.path', 4000);
     expect(recalled).toContain('config.path');
     expect(recalled).toContain('/etc/foo');
@@ -59,7 +60,7 @@ describeReal('Phase E — knowledge persistence (real LLM)', () => {
   it('new task recalls prior knowledge from MemoryStore into worldModel.knowledgeBase', async () => {
     // Pre-populate the workspace's MemoryStore with a fact (as if a previous
     // task had persisted it).
-    const seedStore = new MemoryStore(env.dir());
+    const seedStore = new MemoryStore(new FileMemoryBackend(env.dir()));
     await seedStore.store('database.host: db.example.com', ['world-model']);
 
     const agent = env.makeAgent();

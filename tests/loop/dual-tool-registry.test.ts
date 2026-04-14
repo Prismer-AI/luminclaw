@@ -16,6 +16,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { buildInnerLoopToolRegistry } from '../../src/loop/dual.js';
 import { MemoryStore } from '../../src/memory.js';
+import { FileMemoryBackend } from '../../src/memory-file-backend.js';
 
 describe('buildInnerLoopToolRegistry — inner executor tool surface', () => {
   let tmpWorkspace: string;
@@ -29,7 +30,7 @@ describe('buildInnerLoopToolRegistry — inner executor tool surface', () => {
   });
 
   it('registers memory_store, memory_recall, enter_plan_mode, exit_plan_mode, and bash', async () => {
-    const memStore = new MemoryStore(tmpWorkspace);
+    const memStore = new MemoryStore(new FileMemoryBackend(tmpWorkspace));
     const tools = await buildInnerLoopToolRegistry(tmpWorkspace, memStore);
     const names = tools.list().map(t => t.name);
 
@@ -39,7 +40,7 @@ describe('buildInnerLoopToolRegistry — inner executor tool surface', () => {
   });
 
   it('memory_store tool writes durably to the given MemoryStore', async () => {
-    const memStore = new MemoryStore(tmpWorkspace);
+    const memStore = new MemoryStore(new FileMemoryBackend(tmpWorkspace));
     const tools = await buildInnerLoopToolRegistry(tmpWorkspace, memStore);
     const storeTool = tools.list().find(t => t.name === 'memory_store');
     expect(storeTool).toBeDefined();
@@ -48,7 +49,7 @@ describe('buildInnerLoopToolRegistry — inner executor tool surface', () => {
     expect(result).toMatch(/stored/i);
 
     // Fresh MemoryStore over same dir: recall picks up the write.
-    const fresh = new MemoryStore(tmpWorkspace);
+    const fresh = new MemoryStore(new FileMemoryBackend(tmpWorkspace));
     const recalled = await fresh.recall('fact-A', 4000);
     expect(recalled).toContain('fact-A');
   });

@@ -31,6 +31,7 @@ import { DirectiveRouter } from './directive-router.js';
 import { AgentViewStack } from './view-stack.js';
 import { createWorldModel, buildHandoffContext, extractStructuredFacts, recordCompletion, serializeKnowledgeBaseForMemory } from '../world-model/builder.js';
 import { MemoryStore } from '../memory.js';
+import { FileMemoryBackend } from '../memory-file-backend.js';
 import { loadConfig } from '../config.js';
 import { createLogger } from '../log.js';
 import type { IAgentLoop, LoopMode, AgentLoopInput, AgentLoopResult, AgentLoopCallOpts, Artifact } from './types.js';
@@ -146,7 +147,7 @@ export class DualLoopAgent implements IAgentLoop {
 
   constructor(options: DualLoopAgentOptions = {}) {
     const cfg = loadConfig();
-    this.memStore = new MemoryStore(cfg.workspace.dir);
+    this.memStore = new MemoryStore(new FileMemoryBackend(cfg.workspace.dir));
     this.directiveRouter = new DirectiveRouter();
 
     const intervalMs = options.evictionIntervalMs ?? DEFAULT_EVICTION_MS;

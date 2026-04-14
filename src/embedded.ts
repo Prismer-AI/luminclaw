@@ -27,7 +27,7 @@ import { AgentRegistry, BUILTIN_AGENTS, type AgentConfig } from './agents.js';
 import { MemoryStore, type MemoryBackend } from './memory.js';
 import { createConfig } from './config.js';
 import type { LuminConfig } from './config.js';
-import { createEnterPlanModeTool, createExitPlanModeTool } from './tools/builtins.js';
+import { createEnterPlanModeTool, createExitPlanModeTool } from './tools/plan-mode.js';
 import { createLogger } from './log.js';
 
 const log = createLogger('embedded');

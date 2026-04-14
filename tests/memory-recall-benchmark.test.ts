@@ -23,6 +23,7 @@ import { tmpdir } from 'node:os';
 import { execSync } from 'node:child_process';
 import { OpenAICompatibleProvider, type Message } from '../src/provider.js';
 import { MemoryStore } from '../src/memory.js';
+import { FileMemoryBackend } from '../src/memory-file-backend.js';
 import { Session } from '../src/session.js';
 import { memoryFlushBeforeCompaction, compactConversation } from '../src/compaction.js';
 
@@ -366,7 +367,7 @@ describe.skipIf(!isGatewayReachable())('Memory Recall Benchmark', () => {
 
   beforeAll(() => {
     tmpDir = mkdtempSync(join(tmpdir(), 'lumin-recall-bench-'));
-    memoryStore = new MemoryStore(tmpDir);
+    memoryStore = new MemoryStore(new FileMemoryBackend(tmpDir));
     provider = new OpenAICompatibleProvider({
       baseUrl: BASE_URL,
       apiKey: API_KEY,
