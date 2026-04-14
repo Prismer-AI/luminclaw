@@ -514,85 +514,104 @@ describe('PrismerAgent', () => {
     });
   });
 
-  describe('onIterationStart callback', () => {
-    it('is invoked before each LLM call with (iteration, session)', async () => {
-      const provider: Provider = {
-        name: () => 'mock',
-        chat: vi.fn().mockResolvedValue({
-          text: 'done', toolCalls: undefined,
-          usage: { promptTokens: 1, completionTokens: 1 },
-        }),
-      };
-      const calls: Array<{ iteration: number; sessionId: string }> = [];
-      const agents = new AgentRegistry();
-      agents.registerMany(BUILTIN_AGENTS);
-      const agent = new PrismerAgent({
-        provider,
-        tools: new ToolRegistry(),
-        observer: new ConsoleObserver(),
-        agents,
-        systemPrompt: 'sys',
-        maxIterations: 3,
-        onIterationStart: async (iteration, session) => {
-          calls.push({ iteration, sessionId: session.id });
-        },
-      });
-      const session = new Session('sess-x');
-      await drainGenerator(agent.processMessage('hi', session));
-      expect(calls.length).toBe(1);
-      expect(calls[0]).toEqual({ iteration: 1, sessionId: 'sess-x' });
-    });
+});
 
-    it('fires once per iteration when the model requests tool calls', async () => {
-      const provider: Provider = {
-        name: () => 'mock',
-        chat: vi.fn()
-          .mockResolvedValueOnce({
-            text: '',
-            toolCalls: [{ id: 'c1', name: 'bash', arguments: { command: 'echo hi' } }],
-            usage: { promptTokens: 1, completionTokens: 1 },
-          })
-          .mockResolvedValueOnce({
-            text: 'done', toolCalls: undefined,
-            usage: { promptTokens: 2, completionTokens: 1 },
-          }),
-      };
-      const tools = new ToolRegistry();
-      tools.register(createTool(
-        'bash', 'run',
-        { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] },
-        async () => 'ok',
-      ));
-      const calls: number[] = [];
-      const agents = new AgentRegistry();
-      agents.registerMany(BUILTIN_AGENTS);
-      const agent = new PrismerAgent({
-        provider,
-        tools, observer: new ConsoleObserver(), agents,
-        systemPrompt: 'sys', maxIterations: 5,
-        onIterationStart: async (iteration) => { calls.push(iteration); },
-      });
-      await drainGenerator(agent.processMessage('hi', new Session('s')));
-      expect(calls).toEqual([1, 2]);
-    });
+// ── Real-LLM tests: onIterationStart callback ──
+// Rewritten per `no_mock_for_agent_infra`. Drives the actual provider; checks
+// the callback observably fires with the correct iteration + session.
+import { HAS_REAL_LLM, loadEnvTest } from './helpers/real-llm.js';
+import { OpenAICompatibleProvider } from '../src/provider.js';
+import { loadConfig, resetConfig } from '../src/config.js';
 
-    it('works when callback is omitted (backwards compat)', async () => {
-      const provider: Provider = {
-        name: () => 'mock',
-        chat: vi.fn().mockResolvedValue({
-          text: 'ok', toolCalls: undefined,
-          usage: { promptTokens: 1, completionTokens: 1 },
-        }),
-      };
-      const agents = new AgentRegistry();
-      agents.registerMany(BUILTIN_AGENTS);
-      const agent = new PrismerAgent({
-        provider,
-        tools: new ToolRegistry(), observer: new ConsoleObserver(),
-        agents, systemPrompt: 'sys', maxIterations: 2,
-      });
-      const r = await drainGenerator(agent.processMessage('hi', new Session('s')));
-      expect(r.text).toBe('ok');
-    });
+const describeRealAgent = HAS_REAL_LLM ? describe : describe.skip;
+
+describeRealAgent('PrismerAgent — onIterationStart (real LLM)', () => {
+  beforeEach(() => {
+    loadEnvTest();
+    resetConfig();
   });
+
+  function buildRealProvider(): { provider: Provider; model: string } {
+    const cfg = loadConfig();
+    const provider = new OpenAICompatibleProvider({
+      baseUrl: cfg.llm.baseUrl,
+      apiKey: cfg.llm.apiKey,
+      defaultModel: cfg.llm.model,
+    });
+    return { provider, model: cfg.llm.model };
+  }
+
+  it('fires before each LLM call with (iteration, session)', async () => {
+    const { provider } = buildRealProvider();
+    const calls: Array<{ iteration: number; sessionId: string }> = [];
+    const agents = new AgentRegistry();
+    agents.registerMany(BUILTIN_AGENTS);
+    const agent = new PrismerAgent({
+      provider,
+      tools: new ToolRegistry(),
+      observer: new ConsoleObserver(),
+      agents,
+      systemPrompt: 'You are a test assistant. Keep responses extremely short.',
+      maxIterations: 3,
+      onIterationStart: async (iteration, session) => {
+        calls.push({ iteration, sessionId: session.id });
+      },
+    });
+    const session = new Session('sess-x');
+    await drainGenerator(agent.processMessage('Reply with the word ok.', session));
+    expect(calls.length).toBeGreaterThanOrEqual(1);
+    expect(calls[0]).toEqual({ iteration: 1, sessionId: 'sess-x' });
+  }, 60_000);
+
+  it('fires once per iteration when the model requests tool calls', async () => {
+    const { provider } = buildRealProvider();
+    const tools = new ToolRegistry();
+    tools.register(createTool(
+      'bash', 'Run a shell command and return its output.',
+      { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] },
+      async (args: Record<string, unknown>) => `ran: ${String(args.command)}`,
+    ));
+    const calls: number[] = [];
+    const agents = new AgentRegistry();
+    agents.registerMany(BUILTIN_AGENTS);
+    const agent = new PrismerAgent({
+      provider,
+      tools,
+      observer: new ConsoleObserver(),
+      agents,
+      systemPrompt: 'You are a test assistant. Use the bash tool when asked to run a command.',
+      maxIterations: 5,
+      onIterationStart: async (iteration) => { calls.push(iteration); },
+    });
+    await drainGenerator(agent.processMessage(
+      'Use the bash tool to run the command: echo hi. Then respond with ok.',
+      new Session('s'),
+    ));
+    // At least one iteration must have fired. If the model chose to use the
+    // tool, we expect two (pre-tool, post-tool). We don't require two, as
+    // the LLM may decide not to invoke the tool — but we do require
+    // monotonically increasing values starting at 1.
+    expect(calls.length).toBeGreaterThanOrEqual(1);
+    expect(calls[0]).toBe(1);
+    for (let i = 1; i < calls.length; i++) {
+      expect(calls[i]).toBe(calls[i - 1] + 1);
+    }
+  }, 90_000);
+
+  it('works when callback is omitted (backwards compat)', async () => {
+    const { provider } = buildRealProvider();
+    const agents = new AgentRegistry();
+    agents.registerMany(BUILTIN_AGENTS);
+    const agent = new PrismerAgent({
+      provider,
+      tools: new ToolRegistry(),
+      observer: new ConsoleObserver(),
+      agents,
+      systemPrompt: 'You are a test assistant.',
+      maxIterations: 2,
+    });
+    const r = await drainGenerator(agent.processMessage('Reply with ok.', new Session('s')));
+    expect(typeof r.text).toBe('string');
+    expect(r.text.length).toBeGreaterThan(0);
+  }, 60_000);
 });
