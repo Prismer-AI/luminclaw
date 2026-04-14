@@ -1,107 +1,55 @@
 /**
- * E4 fix verification — runInnerLoop must register memory_store + memory_recall.
+ * E4 regression — the dual-loop inner executor must register the full memory +
+ * plan-mode tool surface (memory_store, memory_recall, enter_plan_mode,
+ * exit_plan_mode) so its capabilities match `runAgent()`.
  *
- * Uses vi.mock at the module level to intercept PrismerAgent construction so
- * we can inspect the ToolRegistry that the inner executor builds without
- * making any real LLM calls.
+ * Rewritten per `no_mock_for_agent_infra`: the tool-registry builder is now
+ * exported as `buildInnerLoopToolRegistry` from `src/loop/dual.ts`. This test
+ * exercises that pure function directly — no PrismerAgent, no LLM, no mocks.
+ *
+ * End-to-end coverage (the tools actually being invoked by the inner loop) is
+ * provided by capability test C7 (cross-task knowledge).
  */
-
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { resetConfig } from '../../src/config.js';
-import type { ToolRegistry } from '../../src/tools.js';
+import { buildInnerLoopToolRegistry } from '../../src/loop/dual.js';
+import { MemoryStore } from '../../src/memory.js';
 
-// Capture the ToolRegistry that runInnerLoop passes to PrismerAgent.
-let capturedTools: ToolRegistry | undefined;
-
-// Mock PrismerAgent so runInnerLoop never makes a real LLM call.
-// The factory intercepts `new PrismerAgent({ tools, ... })` and stores `tools`.
-vi.mock('../../src/agent.js', async (importOriginal) => {
-  const original = await importOriginal<typeof import('../../src/agent.js')>();
-  return {
-    ...original,
-    PrismerAgent: vi.fn().mockImplementation((opts: any) => {
-      capturedTools = opts.tools;
-      return {
-        processMessage: async function* () {
-          return { text: 'stubbed', directives: [], toolsUsed: [], iterations: 1 };
-        },
-      };
-    }),
-  };
-});
-
-describe('E4 fix — DualLoopAgent inner executor tool registry', () => {
+describe('buildInnerLoopToolRegistry — inner executor tool surface', () => {
   let tmpWorkspace: string;
 
   beforeEach(async () => {
-    capturedTools = undefined;
     tmpWorkspace = await fs.mkdtemp(path.join(os.tmpdir(), 'lumin-tool-reg-'));
-    process.env.WORKSPACE_DIR = tmpWorkspace;
-    resetConfig();
   });
 
   afterEach(async () => {
-    delete process.env.WORKSPACE_DIR;
-    resetConfig();
     await fs.rm(tmpWorkspace, { recursive: true, force: true, maxRetries: 3 });
   });
 
-  it('registers memory_store and memory_recall in the inner executor tool registry', async () => {
-    // Import DualLoopAgent *after* vi.mock so it picks up the mocked PrismerAgent.
-    const { DualLoopAgent } = await import('../../src/loop/dual.js');
-    const { Session } = await import('../../src/session.js');
-    const { EventBus } = await import('../../src/sse.js');
+  it('registers memory_store, memory_recall, enter_plan_mode, exit_plan_mode, and bash', async () => {
+    const memStore = new MemoryStore(tmpWorkspace);
+    const tools = await buildInnerLoopToolRegistry(tmpWorkspace, memStore);
+    const names = tools.list().map(t => t.name);
 
-    const agent = new DualLoopAgent();
+    for (const required of ['memory_store', 'memory_recall', 'enter_plan_mode', 'exit_plan_mode', 'bash']) {
+      expect(names, `missing ${required} — registered: ${names.join(', ')}`).toContain(required);
+    }
+  });
 
-    // Create a minimal task in 'executing' state to skip the planning LLM call.
-    const taskId = 'tool-reg-test-task';
-    agent.tasks.create({
-      id: taskId,
-      sessionId: 'tool-reg-session',
-      instruction: 'test',
-      artifactIds: [],
-      status: 'executing',
-    });
-    const task = agent.tasks.get(taskId)!;
+  it('memory_store tool writes durably to the given MemoryStore', async () => {
+    const memStore = new MemoryStore(tmpWorkspace);
+    const tools = await buildInnerLoopToolRegistry(tmpWorkspace, memStore);
+    const storeTool = tools.list().find(t => t.name === 'memory_store');
+    expect(storeTool).toBeDefined();
 
-    const session = {
-      id: 'tool-reg-session',
-      messages: [],
-      addMessage: () => {},
-    } as any;
+    const result = await storeTool!.execute({ content: 'fact-A', tags: ['t1'] }, {} as never);
+    expect(result).toMatch(/stored/i);
 
-    const bus = new EventBus();
-    const abortController = new AbortController();
-
-    // Call runInnerLoop directly (it's private, use `as any`).
-    // PrismerAgent is mocked → no LLM calls, just tool registration happens.
-    await (agent as any).runInnerLoop(
-      task,
-      { content: 'test' },
-      session,
-      bus,
-      abortController.signal,
-    );
-
-    await agent.shutdown();
-
-    expect(
-      capturedTools,
-      'PrismerAgent mock was not called — runInnerLoop did not reach agent construction',
-    ).toBeTruthy();
-
-    const registeredNames = capturedTools!.list().map((t) => t.name);
-    expect(
-      registeredNames,
-      `memory_store missing — registered tools: ${registeredNames.join(', ')}`,
-    ).toContain('memory_store');
-    expect(
-      registeredNames,
-      `memory_recall missing — registered tools: ${registeredNames.join(', ')}`,
-    ).toContain('memory_recall');
+    // Fresh MemoryStore over same dir: recall picks up the write.
+    const fresh = new MemoryStore(tmpWorkspace);
+    const recalled = await fresh.recall('fact-A', 4000);
+    expect(recalled).toContain('fact-A');
   });
 });

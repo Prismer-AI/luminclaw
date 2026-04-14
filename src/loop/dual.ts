@@ -47,6 +47,69 @@ const PLANNING_TIMEOUT_MS = 5_000;
 /** Default eviction interval and max-age: 1 hour. */
 const DEFAULT_EVICTION_MS = 60 * 60 * 1_000;
 
+/**
+ * Build the ToolRegistry used by the dual-loop inner executor.
+ *
+ * Mirrors the registrations in `src/index.ts::ensureInitialized()` so the
+ * inner executor exposes the same tool surface as `runAgent()`. Exported for
+ * unit testing (see `tests/loop/dual-tool-registry.test.ts`) and to keep the
+ * set of registered tools verifiable without exercising the full inner loop.
+ */
+export async function buildInnerLoopToolRegistry(
+  workspaceDir: string,
+  memStore: MemoryStore,
+  pluginPath?: string,
+): Promise<ToolRegistry> {
+  const tools = new ToolRegistry();
+  try {
+    const { tools: workspaceTools } = await loadWorkspaceToolsFromPlugin(pluginPath);
+    tools.registerMany(workspaceTools);
+  } catch { /* plugin not available locally */ }
+
+  tools.register(createBashTool(workspaceDir));
+
+  tools.register(createTool(
+    'memory_store',
+    'Store a memory entry for later recall. Use to save important facts, decisions, code snippets, or action items.',
+    {
+      type: 'object',
+      properties: {
+        content: { type: 'string', description: 'The memory content to store' },
+        tags: { type: 'array', items: { type: 'string' }, description: 'Optional tags for categorization' },
+      },
+      required: ['content'],
+    },
+    async (args) => {
+      const content = args.content as string;
+      const tags = (args.tags as string[] | undefined) ?? [];
+      await memStore.store(content, tags);
+      return 'Memory stored successfully.';
+    },
+  ));
+  tools.register(createTool(
+    'memory_recall',
+    'Search stored memories by keywords. Returns relevant past entries sorted by relevance.',
+    {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Keywords to search for in memories' },
+        maxChars: { type: 'number', description: 'Max characters to return (default: 4000)' },
+      },
+      required: ['query'],
+    },
+    async (args) => {
+      const query = args.query as string;
+      const result = await memStore.recall(query, (args.maxChars as number) ?? 4000);
+      return result || 'No matching memories found.';
+    },
+  ));
+
+  tools.register(createEnterPlanModeTool());
+  tools.register(createExitPlanModeTool());
+
+  return tools;
+}
+
 export interface DualLoopAgentOptions {
   /** How often to run the eviction sweep (ms). Default: 3_600_000 (1h). */
   evictionIntervalMs?: number;
@@ -313,61 +376,10 @@ export class DualLoopAgent implements IAgentLoop {
       systemPrompt += `\n\n## Execution Plan\n${planSteps.map((s, i) => `${i + 1}. ${s}`).join('\n')}`;
     }
 
-    // Initialize tools
-    const tools = new ToolRegistry();
-    try {
-      const { tools: workspaceTools } = await loadWorkspaceToolsFromPlugin(cfg.workspace.pluginPath);
-      tools.registerMany(workspaceTools);
-    } catch { /* plugin not available locally */ }
-
-    // Bash tool — canonical factory from tools/builtins.ts so the dual-loop
-    // runtime shares the same abort-signal semantics as runAgent().
+    // Initialize tools — delegated to the shared builder so unit tests can
+    // inspect the exact tool surface without running the full inner loop.
     const workspaceDir = cfg.workspace.dir;
-    tools.register(createBashTool(workspaceDir));
-
-    // Memory tools — required for cross-task knowledge continuity (Phase E).
-    // Mirror the registrations in src/index.ts::ensureInitialized() so that
-    // the dual-loop inner executor has the same tool surface as runAgent().
-    const memStoreInstance = this.memStore;
-    tools.register(createTool(
-      'memory_store',
-      'Store a memory entry for later recall. Use to save important facts, decisions, code snippets, or action items.',
-      {
-        type: 'object',
-        properties: {
-          content: { type: 'string', description: 'The memory content to store' },
-          tags: { type: 'array', items: { type: 'string' }, description: 'Optional tags for categorization' },
-        },
-        required: ['content'],
-      },
-      async (args) => {
-        const content = args.content as string;
-        const tags = (args.tags as string[] | undefined) ?? [];
-        await memStoreInstance.store(content, tags);
-        return 'Memory stored successfully.';
-      },
-    ));
-    tools.register(createTool(
-      'memory_recall',
-      'Search stored memories by keywords. Returns relevant past entries sorted by relevance.',
-      {
-        type: 'object',
-        properties: {
-          query: { type: 'string', description: 'Keywords to search for in memories' },
-          maxChars: { type: 'number', description: 'Max characters to return (default: 4000)' },
-        },
-        required: ['query'],
-      },
-      async (args) => {
-        const query = args.query as string;
-        const result = await memStoreInstance.recall(query, (args.maxChars as number) ?? 4000);
-        return result || 'No matching memories found.';
-      },
-    ));
-
-    // Plan mode tools (D4) — mirror registrations in src/index.ts::ensureInitialized.
-    tools.register(createEnterPlanModeTool());
-    tools.register(createExitPlanModeTool());
+    const tools = await buildInnerLoopToolRegistry(workspaceDir, this.memStore, cfg.workspace.pluginPath);
 
     const agents = new AgentRegistry();
     agents.registerMany(BUILTIN_AGENTS);
