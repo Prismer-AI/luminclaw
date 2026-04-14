@@ -178,7 +178,7 @@ describe('DualLoopAgent', () => {
 
     agent.cancel();
     expect(task.status).toBe('failed');
-    expect(task.error).toBe('Cancelled by user');
+    expect(task.error).toBe('cancelled: user_explicit_cancel');
   });
 
   it('resume transitions paused task to executing', async () => {

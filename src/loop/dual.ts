@@ -29,6 +29,7 @@ import { createLogger } from '../log.js';
 import type { IAgentLoop, LoopMode, AgentLoopInput, AgentLoopResult, AgentLoopCallOpts, Artifact } from './types.js';
 import type { WorldModel } from '../world-model/types.js';
 import type { Task } from '../task/types.js';
+import { AbortReason, createAbortError, type AbortReasonValue } from '../abort.js';
 
 const log = createLogger('loop:dual');
 
@@ -354,6 +355,10 @@ export class DualLoopAgent implements IAgentLoop {
       // Complete the task
       this.stateMachine.complete(task, result.text);
 
+      // Drain any messages that arrived while the task was finishing — they
+      // are orphaned because there is no active task to receive them.
+      this.drainQueueOnTermination(task.id, 'task_completed');
+
       // Emit result checkpoint
       this.tasks.addCheckpoint(task.id, {
         id: randomUUID(),
@@ -441,16 +446,37 @@ export class DualLoopAgent implements IAgentLoop {
     }
   }
 
-  cancel(): void {
-    // Abort the inner loop via AbortSignal
+  cancel(reason: AbortReasonValue = AbortReason.UserExplicitCancel): void {
+    // Abort the inner loop via AbortSignal with structured reason.
+    // NOTE: we intentionally do NOT null out this.abortController here so
+    // callers (and tests) can still inspect signal.reason after cancel().
     if (this.abortController) {
-      this.abortController.abort();
-      this.abortController = null;
+      this.abortController.abort(createAbortError(reason));
     }
     const active = this.tasks.getActive();
     if (active) {
-      try { this.stateMachine.fail(active, 'Cancelled by user'); } catch { /* already terminal */ }
-      log.info('task cancelled', { taskId: active.id });
+      try { this.stateMachine.fail(active, `cancelled: ${reason}`); } catch { /* already terminal */ }
+      log.info('task cancelled', { taskId: active.id, reason });
+      this.drainQueueOnTermination(active.id, 'task_aborted');
+    }
+  }
+
+  /**
+   * Drain any queued messages for a task that is terminating and emit
+   * `task.message.orphaned` events for each so callers can surface them to
+   * the user (and not silently lose them).  Fires on both completion and
+   * cancellation paths.
+   */
+  private drainQueueOnTermination(taskId: string, reason: 'task_completed' | 'task_aborted'): void {
+    const drained = this.messageQueue.drainForTask(taskId);
+    if (drained.length === 0) return;
+    const bus = this.activeBus;
+    if (!bus) return;
+    for (const m of drained) {
+      bus.publish({
+        type: 'task.message.orphaned' as const,
+        data: { taskId, messageId: m.id, content: m.content, reason },
+      });
     }
   }
 

@@ -12,6 +12,7 @@
 
 import type { EventBus } from '../sse.js';
 import type { Artifact as ArtifactType, ArtifactInput, ArtifactStore } from '../artifacts/types.js';
+import type { AbortReasonValue } from '../abort.js';
 
 // ── Mode ─────────────────────────────────────────────────
 
@@ -103,9 +104,11 @@ export interface IAgentLoop {
   /**
    * Cancel the active task.
    * Single-loop: no-op.
-   * Dual-loop: sets a cancellation flag checked at the next tool boundary.
+   * Dual-loop: aborts the inner AbortController (carrying the structured
+   * {@link AbortReasonValue}) and drains any queued messages as orphans.
+   * Defaults to `user_explicit_cancel` when no reason is supplied.
    */
-  cancel(): void;
+  cancel(reason?: AbortReasonValue): void;
 
   /**
    * Return all tasks from the task store (if available).

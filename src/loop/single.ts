@@ -25,6 +25,7 @@ import type {
   ArtifactStore,
   DirectiveRecord,
 } from './types.js';
+import type { AbortReasonValue } from '../abort.js';
 
 export class SingleLoopAgent implements IAgentLoop {
   readonly mode: LoopMode = 'single';
@@ -92,8 +93,9 @@ export class SingleLoopAgent implements IAgentLoop {
   /**
    * No-op in single-loop mode.
    * Task cancellation is only meaningful in dual-loop mode (Phase 4).
+   * The `reason` parameter is accepted for interface parity and ignored.
    */
-  cancel(): void {}
+  cancel(_reason?: AbortReasonValue): void {}
 
   async shutdown(): Promise<void> {}
 }

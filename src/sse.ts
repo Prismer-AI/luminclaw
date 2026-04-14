@@ -131,6 +131,15 @@ export const AgentEventSchema = z.discriminatedUnion('type', [
     data: z.object({ taskId: z.string(), messageId: z.string(), content: z.string() }),
   }),
   z.object({
+    type: z.literal('task.message.orphaned'),
+    data: z.object({
+      taskId: z.string(),
+      messageId: z.string(),
+      content: z.string(),
+      reason: z.enum(['task_completed', 'task_aborted']),
+    }),
+  }),
+  z.object({
     type: z.literal('task.progress'),
     data: z.object({
       taskId: z.string(),
