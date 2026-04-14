@@ -203,7 +203,7 @@ followups:
 
 ## 6. Fix outcome
 
-Registers `memory_store` and `memory_recall` in `DualLoopAgent.runInnerLoop`'s tool registry, mirroring `src/index.ts::ensureInitialized()`. Cross-task knowledge continuity now works in dual-loop mode as it does in single-loop mode.
+Commit `5ded1d1` registers `memory_store` and `memory_recall` in `DualLoopAgent.runInnerLoop`'s tool registry, mirroring `src/index.ts::ensureInitialized()`. Cross-task knowledge continuity now works in dual-loop mode as it does in single-loop mode.
 
 ### Changes
 
