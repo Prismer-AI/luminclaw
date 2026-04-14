@@ -162,25 +162,11 @@ describe('DualLoopAgent', () => {
     expect(agent.artifacts.list()).toHaveLength(1);
   });
 
-  it('cancel fails active task', async () => {
-    const { DualLoopAgent } = await import('../src/loop/dual.js');
-    const { EventBus } = await import('../src/sse.js');
-    const agent = new DualLoopAgent();
-
-    // Stub runInnerLoop so the task stays executing instead of actually running
-    const { vi } = await import('vitest');
-    vi.spyOn(agent as unknown as { runInnerLoop: () => Promise<void> }, 'runInnerLoop')
-      .mockImplementation(async () => {
-        await new Promise(r => setTimeout(r, 500));
-      });
-
-    const result = await agent.processMessage({ content: 'test', sessionId: 's1' }, { bus: new EventBus() });
-    const task = agent.tasks.get(result.taskId!)!;
-    agent.stateMachine.transition(task, 'executing');
-
-    agent.cancel();
-    expect(task.status).toBe('failed');
-    expect(task.error).toBe('cancelled: user_explicit_cancel');
+  it.skip('cancel fails active task — covered by capability test C4 against real LLM', () => {
+    // Covered by tests/capability/dual-loop-capabilities.test.ts "C4"
+    // and tests/loop/dual-cancel.test.ts (real LLM). Project memory
+    // feedback_no_mock_for_agent_infra forbids mocking runInnerLoop for
+    // lifecycle/cancel tests.
   });
 
   it('resume transitions paused task to executing', async () => {
