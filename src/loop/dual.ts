@@ -29,6 +29,7 @@ import { createLogger } from '../log.js';
 import type { IAgentLoop, LoopMode, AgentLoopInput, AgentLoopResult, AgentLoopCallOpts, Artifact } from './types.js';
 import type { WorldModel } from '../world-model/types.js';
 import type { Task } from '../task/types.js';
+import { appendTurn, writeMeta, type TaskMetadata } from '../task/disk.js';
 import { AbortReason, createAbortError, type AbortReasonValue } from '../abort.js';
 
 const log = createLogger('loop:dual');
@@ -118,6 +119,24 @@ export class DualLoopAgent implements IAgentLoop {
       this.artifacts.assignToTask(a.id, taskId);
     }
 
+    // B3: Persist initial metadata + initial user turn (fire-and-forget).
+    const persistWorkspaceDir = loadConfig().workspace.dir;
+    const initMeta: TaskMetadata = {
+      id: taskId,
+      sessionId,
+      instruction: input.content,
+      status: 'pending',
+      createdAt: task.createdAt,
+      updatedAt: task.updatedAt,
+      lastPersistedTurnOffset: 0,
+      version: 1,
+    };
+    void writeMeta(persistWorkspaceDir, sessionId, taskId, initMeta)
+      .catch(e => log.warn('writeMeta failed', { taskId, error: String(e) }));
+    void appendTurn(persistWorkspaceDir, sessionId, taskId, {
+      kind: 'user', content: input.content, timestamp: task.createdAt,
+    }).catch(e => log.warn('appendTurn failed', { taskId, error: String(e) }));
+
     // Recall previous world model facts from MemoryStore and seed knowledgeBase
     const newWorldModel = createWorldModel(taskId, input.content);
     try {
@@ -151,6 +170,7 @@ export class DualLoopAgent implements IAgentLoop {
     this.runInnerLoop(task, input, session, bus, abortController.signal).catch(err => {
       log.error('inner loop crashed', { taskId, error: err instanceof Error ? err.message : String(err) });
       try { this.stateMachine.fail(task, err instanceof Error ? err.message : String(err)); } catch { /* already terminal */ }
+      void this.persistState(task, err instanceof Error ? err.message : String(err));
       // Drain any queued messages so callers see them surface as orphaned
       // rather than silently disappearing when the inner loop crashes.
       this.drainQueueOnTermination(task.id, 'task_aborted');
@@ -227,6 +247,7 @@ export class DualLoopAgent implements IAgentLoop {
 
     // Transition to executing
     this.stateMachine.transition(task, 'executing');
+    void this.persistState(task);
 
     // Emit progress checkpoint
     this.tasks.addCheckpoint(task.id, {
@@ -357,6 +378,7 @@ export class DualLoopAgent implements IAgentLoop {
 
       // Complete the task
       this.stateMachine.complete(task, result.text);
+      void this.persistState(task);
 
       // Drain any messages that arrived while the task was finishing — they
       // are orphaned because there is no active task to receive them.
@@ -394,6 +416,7 @@ export class DualLoopAgent implements IAgentLoop {
       }});
     } catch (err) {
       try { this.stateMachine.fail(task, err instanceof Error ? err.message : String(err)); } catch { /* already terminal */ }
+      void this.persistState(task, err instanceof Error ? err.message : String(err));
       // Drain queued messages BEFORE emitting the error so subscribers see
       // orphan events alongside the failure.
       this.drainQueueOnTermination(task.id, 'task_aborted');
@@ -403,6 +426,37 @@ export class DualLoopAgent implements IAgentLoop {
       // so the map doesn't grow unbounded across runs.
       this.taskContexts.delete(task.id);
       await observer.flush();
+    }
+  }
+
+  /**
+   * B3: Persist current task state to disk (status turn + metadata rewrite).
+   * Fire-and-forget — errors are logged, never thrown, never awaited by caller.
+   */
+  private async persistState(task: Task, reason?: string): Promise<void> {
+    const workspaceDir = loadConfig().workspace.dir;
+    const ts = Date.now();
+    try {
+      await appendTurn(workspaceDir, task.sessionId, task.id, {
+        kind: 'status', status: task.status, reason, timestamp: ts,
+      });
+      const meta: TaskMetadata = {
+        id: task.id,
+        sessionId: task.sessionId,
+        instruction: task.instruction,
+        status: task.status,
+        createdAt: task.createdAt,
+        updatedAt: ts,
+        endedAt: ['completed', 'failed', 'interrupted', 'killed'].includes(task.status) ? ts : undefined,
+        iterations: task.progress?.iterations,
+        toolsUsed: task.progress?.toolsUsed,
+        error: task.error,
+        lastPersistedTurnOffset: 0,
+        version: 1,
+      };
+      await writeMeta(workspaceDir, task.sessionId, task.id, meta);
+    } catch (err) {
+      log.warn('persistState failed', { taskId: task.id, error: String(err) });
     }
   }
 
@@ -488,6 +542,7 @@ export class DualLoopAgent implements IAgentLoop {
       const task = this.tasks.get(id);
       if (task) {
         try { this.stateMachine.fail(task, `cancelled: ${reason}`); } catch { /* already terminal */ }
+        void this.persistState(task, `cancelled: ${reason}`);
         log.info('task cancelled', { taskId: id, reason });
         this.drainQueueOnTermination(id, 'task_aborted');
       }
