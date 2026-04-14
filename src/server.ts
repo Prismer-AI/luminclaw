@@ -367,6 +367,33 @@ async function handleCancelTask(req: IncomingMessage, res: ServerResponse, taskI
   json(res, 200, { status: 'cancelled', taskId, reason });
 }
 
+/**
+ * POST /v1/tasks/:id/resume — resume an interrupted task by replaying its
+ * persisted transcript and re-dispatching the inner loop.
+ *
+ * Responses:
+ *   200 — `{ status: 'resumed', taskId, sessionId }`
+ *   404 — task not found
+ *   405 — current loop mode doesn't support resume (e.g. single-loop)
+ *   409 — task is in a non-resumable status
+ */
+async function handleResumeTask(_req: IncomingMessage, res: ServerResponse, taskId: string): Promise<void> {
+  const loop = getLoop();
+  if (!loop.resumeTask) {
+    json(res, 405, { error: 'Resume not supported in current loop mode' });
+    return;
+  }
+  try {
+    const result = await loop.resumeTask(taskId);
+    log.info('task resumed', { taskId });
+    json(res, 200, { status: 'resumed', ...result });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const code = msg.includes('not found') ? 404 : 409;
+    json(res, code, { error: msg });
+  }
+}
+
 // ── WebSocket Handler ────────────────────────────────────
 
 function handleWebSocket(req: IncomingMessage, socket: import('node:net').Socket): void {
@@ -634,6 +661,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       } else if (path.startsWith('/v1/tasks/') && path.endsWith('/cancel') && method === 'POST') {
         const taskId = path.slice('/v1/tasks/'.length, -'/cancel'.length);
         await handleCancelTask(req, res, taskId);
+      } else if (path.startsWith('/v1/tasks/') && path.endsWith('/resume') && method === 'POST') {
+        const taskId = path.slice('/v1/tasks/'.length, -'/resume'.length);
+        await handleResumeTask(req, res, taskId);
       } else if (path.startsWith('/v1/tasks/') && method === 'GET') {
         const taskId = path.slice('/v1/tasks/'.length);
         await handleGetTask(req, res, taskId);

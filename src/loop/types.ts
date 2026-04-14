@@ -141,6 +141,16 @@ export interface IAgentLoop {
    */
   loadPersistedTasks?(): Promise<void>;
 
+  /**
+   * Resume an interrupted task — replays the persisted transcript into a
+   * fresh session and re-dispatches the inner loop.
+   *
+   * Only tasks in status `interrupted` are resumable.  Throws otherwise.
+   *
+   * Optional — single-loop implementations may omit this method.
+   */
+  resumeTask?(taskId: string): Promise<{ taskId: string; sessionId: string }>;
+
   /** Graceful shutdown — wait for in-flight work to settle. */
   shutdown(): Promise<void>;
 }

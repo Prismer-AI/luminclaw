@@ -29,7 +29,7 @@ import { createLogger } from '../log.js';
 import type { IAgentLoop, LoopMode, AgentLoopInput, AgentLoopResult, AgentLoopCallOpts, Artifact } from './types.js';
 import type { WorldModel } from '../world-model/types.js';
 import type { Task } from '../task/types.js';
-import { appendTurn, writeMeta, enumerateSessionTasks, type TaskMetadata } from '../task/disk.js';
+import { appendTurn, writeMeta, readTranscript, enumerateSessionTasks, type TaskMetadata } from '../task/disk.js';
 import { AbortReason, createAbortError, type AbortReasonValue } from '../abort.js';
 import type { TaskStatus } from '../task/types.js';
 
@@ -495,6 +495,87 @@ export class DualLoopAgent implements IAgentLoop {
       }
     }
     log.info('loaded persisted tasks', { count: metas.length });
+  }
+
+  /**
+   * B5: Resume an interrupted task by replaying its persisted transcript
+   * into a fresh session and re-dispatching the inner loop.
+   *
+   * Only tasks in status `interrupted` (as re-registered by
+   * {@link loadPersistedTasks}) are resumable.  After a successful resume the
+   * task transitions to `executing` and the inner loop runs fire-and-forget
+   * on a new AbortController + EventBus.
+   */
+  async resumeTask(taskId: string): Promise<{ taskId: string; sessionId: string }> {
+    const task = this.tasks.get(taskId);
+    if (!task) throw new Error(`Task ${taskId} not found`);
+    if (task.status !== 'interrupted') {
+      throw new Error(`Cannot resume task in status '${task.status}' — only 'interrupted' is resumable`);
+    }
+
+    // Load transcript from disk and replay into a fresh session.
+    const workspaceDir = loadConfig().workspace.dir;
+    const turns = await readTranscript(workspaceDir, task.sessionId, taskId);
+
+    const session = this.sessions.getOrCreate(task.sessionId);
+    // Reset — we'll replay from disk. Session.messages is readonly in the
+    // type but array mutation (length reset) is permitted.
+    session.messages.length = 0;
+    for (const turn of turns) {
+      if (turn.kind === 'user') {
+        session.addMessage({ role: 'user', content: turn.content });
+      } else if (turn.kind === 'assistant') {
+        // Convert TurnEntry toolCalls ({id,name,arguments}) to Message shape
+        // ({id,type:'function',function:{name,arguments:string}}).
+        const msgToolCalls = turn.toolCalls?.map(tc => ({
+          id: tc.id,
+          type: 'function' as const,
+          function: {
+            name: tc.name,
+            arguments: typeof tc.arguments === 'string' ? tc.arguments : JSON.stringify(tc.arguments ?? {}),
+          },
+        }));
+        session.addMessage({
+          role: 'assistant',
+          content: turn.content,
+          toolCalls: msgToolCalls,
+        });
+      } else if (turn.kind === 'tool') {
+        session.addMessage({
+          role: 'tool',
+          content: turn.content,
+          toolCallId: turn.toolCallId,
+        });
+      }
+      // 'status' turns are lifecycle markers, not session messages.
+    }
+
+    // Transition back to executing.
+    this.stateMachine.transition(task, 'executing');
+    void this.persistState(task);
+
+    // Create new abortController + bus for the resumed task.
+    const abortController = new AbortController();
+    const bus = new EventBus();
+    this.taskContexts.set(taskId, { abortController, bus });
+
+    // Re-dispatch inner loop (fire-and-forget).
+    void this.runInnerLoop(
+      task,
+      { content: task.instruction, sessionId: task.sessionId },
+      session,
+      bus,
+      abortController.signal,
+    )
+      .catch(err => {
+        log.error('resumed inner loop crashed', { taskId, error: String(err) });
+        try { this.stateMachine.fail(task, String(err)); } catch { /* already terminal */ }
+        void this.persistState(task, String(err));
+        this.drainQueueOnTermination(taskId, 'task_aborted');
+        this.taskContexts.delete(taskId);
+      });
+
+    return { taskId, sessionId: task.sessionId };
   }
 
   getTasks() {
