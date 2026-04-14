@@ -170,3 +170,16 @@ export function recordCompletion(
 ): void {
   worldModel.completedWork.push(record);
 }
+
+// ── Knowledge Serialization ───────────────────────────────
+
+const CONFIDENCE_ORDER: Record<KnowledgeFact['confidence'], number> = {
+  high: 0, medium: 1, low: 2,
+};
+
+export function serializeKnowledgeBaseForMemory(facts: KnowledgeFact[]): string {
+  const sorted = [...facts].sort(
+    (a, b) => CONFIDENCE_ORDER[a.confidence] - CONFIDENCE_ORDER[b.confidence],
+  );
+  return sorted.map(f => `${f.key}: ${f.value}`).join('\n');
+}
