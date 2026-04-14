@@ -342,6 +342,25 @@ await taskStore.terminate(taskId, done ? 'completed' : 'killed');
 
 The existing `POST /v1/chat` keeps its current semantics. When the target session already has an active task, it enqueues to that task's queue instead of spawning a new one. This is the single biggest protocol change required.
 
+### 3.5 Mapping to PARA v0.1 Tiers
+
+The seven patterns are also the foundation required for luminclaw to serve as the `@prismer/adapter-luminclaw` reference adapter in **Prismer Runtime v1.9.0** (see `prismer-cloud-next/docs/ReleasePlan-1.9.0.md` §4.2, §5.3.3). The crosswalk:
+
+| PARA Tier | Required Pattern(s) | luminclaw module producing it |
+|-----------|---------------------|-------------------------------|
+| L1 Discovery | — (metadata only) | `adapter-luminclaw/manifest.yaml` |
+| L2 Message I/O | 1 (queue) + 2 (task entity) | `messageQueue.ts`, `TaskStore` |
+| L3 Tool Call Observation | 5 (events + atomic notified) | `sdkEventQueue` equivalent |
+| L4 Tool/Memory Injection | 1 (queue for injection) + 5 | `messageQueue.ts` + skill loader |
+| L5 Approval Gate | 7 (PermissionMode) + 1 (remote approve flows back via queue) | `permissions.ts` + `messageQueue.ts` |
+| L6 Remote Command | 1 + 2 + 6 (structured abort for cancel) | `messageQueue.ts` + `TaskStore` + `abort.ts` |
+| L7 FS Delegation | 7 (delegated out-of-process) | consumed from `@prismer/sandbox-runtime` |
+| L8 Session Export | 2 + 4 (disk-backed trace) | `TaskStore` + `DiskPersistence` |
+
+**Key implication.** The pattern ordering 1 → 2/4 → 5/6/7 in this document is also the order in which PARA Tiers become honestly declarable. A luminclaw build that reports `tiersSupported: [1, 3, 7]` is internally consistent; declaring L4+ without Pattern 1 landed is the same overclaim the companion audit doc flags in §1.3.
+
+**Design consequence.** The PARA shim (`@prismer/adapter-luminclaw`, ~300–500 LOC per v1.9.0 plan) is a translation layer *on top of* the patterns implemented here. It cannot synthesize queue semantics, atomic event emission, or a disk-resumable trace if those primitives are not present in the host runtime. **Implement the patterns first; shim second.** Any effort that tries to bridge PARA events to fire-and-forget dispatch will reproduce the race conditions enumerated in the audit doc §1.2.
+
 ---
 
 ## 4. What We Are Not Copying from CC
@@ -370,6 +389,8 @@ Questions deliberately not answered in this design — surface during implementa
 4. **Cross-runtime parity for Permission modes.** TS has partial approval gates. Rust has nothing. Port first, or redesign first? Port first for correctness, redesign jointly in Phase D.
 
 5. **Task type taxonomy.** CC has six task types. We likely need three initially: `agent` (primary use case), `shell` (direct bash), `teammate` (sub-agent delegation). `remote` can come later.
+
+6. **luminclaw-rust's PARA stance.** v1.9.0 specifies `@prismer/adapter-luminclaw` as a full-Tier (L1–L8) reference. luminclaw-rust today has no equivalent of Patterns 1/2/4/6 (see audit §1.1). Three options: (a) **TS-only reference** — document luminclaw-rust as "PARA-incomplete" in v1.9.0; (b) **port patterns to Rust in-scope** — adds ≥ 10 workdays; (c) **wire-schema-only Rust parity** — defer runtime-level PARA to v2.0. Must be decided before PARA spec freeze (P0 of v1.9.0). Recommendation: (c).
 
 ---
 

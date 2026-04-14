@@ -7,3 +7,12 @@ rust/target/
 tests/output/
 .DS_Store
 .claude/
+
+# Runtime workspace created by `lumin serve` + tests
+workspace/
+
+# Large reference implementations we study but don't track in this repo
+# (ref/CC-Source is intentionally tracked — do not add it here)
+ref/hermes-agent/
+ref/ironclaw/
+ref/nanoclaw/

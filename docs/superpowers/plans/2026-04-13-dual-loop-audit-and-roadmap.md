@@ -23,15 +23,17 @@ Read the design doc first. This doc assumes you know the seven patterns (Message
 
 ### 1.1 Seven-Pattern Match Table
 
-| # | Pattern | luminclaw current state | Gap severity |
-|---|---|---|---|
-| 1 | **Message queue between loops** | Absent. New user input creates a new task. Running tasks see nothing. | **Fundamental** — no way to steer in-flight work |
-| 2 | **Tasks as cross-turn state** | Partial. `InMemoryTaskStore` exists. Lost on restart. No polling cursor. No output file. | Significant |
-| 3 | **Polling loop for output** | Absent. Only `chat.final` fires at completion. No incremental output delivery. | Significant |
-| 4 | **Disk-backed resume** | Absent. Tasks are in-memory only. `--resume` not implemented. | Significant |
-| 5 | **Event emission + atomic notify** | Partial. `chat.final` via `EventBus`. No atomic `notified` flag — doc §13 warns of fire-and-forget result loss. | Medium |
-| 6 | **Structured abort + synthetic results** | Broken. Rust cancel flag not checked (doc §4.3). TS checks at iteration boundary only, no synthetic results. | Significant |
-| 7 | **Permission mode + `requiresUserInteraction`** | Absent. Approval gates are binary per-tool (TS only). No plan mode. No `requiresUserInteraction` concept. | Significant |
+| # | Pattern | luminclaw current state | Gap severity | Blocks PARA Tier |
+|---|---|---|---|---|
+| 1 | **Message queue between loops** | Absent. New user input creates a new task. Running tasks see nothing. | **Fundamental** — no way to steer in-flight work | L2, L4, L5, L6 |
+| 2 | **Tasks as cross-turn state** | Partial. `InMemoryTaskStore` exists. Lost on restart. No polling cursor. No output file. | Significant | L6, L8 |
+| 3 | **Polling loop for output** | Absent. Only `chat.final` fires at completion. No incremental output delivery. | Significant | L3 (incremental), L6 |
+| 4 | **Disk-backed resume** | Absent. Tasks are in-memory only. `--resume` not implemented. | Significant | L8 |
+| 5 | **Event emission + atomic notify** | Partial. `chat.final` via `EventBus`. No atomic `notified` flag — doc §13 warns of fire-and-forget result loss. | Medium | L3, L6 |
+| 6 | **Structured abort + synthetic results** | Broken. Rust cancel flag not checked (doc §4.3). TS checks at iteration boundary only, no synthetic results. | Significant | L6 |
+| 7 | **Permission mode + `requiresUserInteraction`** | Absent. Approval gates are binary per-tool (TS only). No plan mode. No `requiresUserInteraction` concept. | Significant | L5, L7 |
+
+**Reading the last column.** PARA Tiers come from `prismer-cloud-next/docs/ReleasePlan-1.9.0.md` §4.2. The v1.9.0 plan positions luminclaw as the full-Tier (L1–L8) PARA reference. By this table, luminclaw can today declare only **L1 + L3 (at-completion only) + L7 (if `@prismer/sandbox-runtime` is consumed)**. Every other Tier is blocked by at least one missing pattern. See §7 for the resulting phased Tier-declaration sequence.
 
 ### 1.2 Architectural Root Cause
 
@@ -145,9 +147,10 @@ Each phase is independently valuable and separately validatable. Phases A and C 
 ### Phase A — Message Queue + Task Polling Endpoint
 
 **Unlocks:** C1, C3 (partial), C5.
+**PARA Tiers enabled:** L2, L4, L3 (incremental).
 **Estimate:** 2–3 days.
 **Prerequisite:** None.
-**Highest leverage of all phases.** Without this, no other phase matters for end-user experience.
+**Highest leverage of all phases.** Without this, no other phase matters for end-user experience — and no PARA Tier above L1/L7 is honestly declarable.
 
 Tasks:
 
@@ -162,6 +165,7 @@ Exit criteria: C1 and C5 pass with real LLM; C3 passes for live-reconnect case (
 ### Phase B — Disk Persistence + Resume
 
 **Unlocks:** C3 robustly. Enables server restart without data loss.
+**PARA Tiers enabled:** L8 (pre-compaction trace; prerequisite for v2.0 Arena Replay).
 **Estimate:** 3–4 days.
 **Prerequisite:** Phase A (to have a well-defined task entity).
 
@@ -177,6 +181,7 @@ Exit criteria: C3 passes across a full server restart; recovered transcripts rep
 ### Phase C — Structured Abort + Synthetic Results
 
 **Unlocks:** C4 in both runtimes.
+**PARA Tiers enabled:** L6 (remote `cancel` command reaches in-flight tool with clean propagation).
 **Estimate:** 2 days.
 **Prerequisite:** Phase A (cancel command flows through the queue).
 
@@ -193,8 +198,9 @@ Exit criteria: C4 passes in both TS and Rust; synthetic results preserve message
 ### Phase D — Permission Mode + Plan Mode
 
 **Unlocks:** Safe autonomous production use. Required before dual-loop is recommended for untrusted input in Rust.
-**Estimate:** 3 days.
-**Prerequisite:** None (can run in parallel with A/B/C).
+**PARA Tiers enabled:** L5 (Approval gate — requires Phase A for remote approve to flow back).
+**Estimate:** 3 days (1.5 if `PermissionContext` is consumed from `@prismer/sandbox-runtime` rather than re-implemented — see §7.3).
+**Prerequisite:** None for the core PermissionMode plumbing, but L5 end-to-end also needs Phase A.
 
 Tasks:
 
@@ -279,6 +285,10 @@ Expected outcome: second request blocks for many seconds (current implementation
 
 Record the measured latency and behavior as the baseline `C1_before`. After Phase A, rerun and record `C1_after`.
 
+### 4.3 Decide luminclaw-rust's PARA Stance
+
+Before Phase A starts, answer a single binary question: **is luminclaw-rust a v1.9.0 PARA adapter, or not?** This controls whether Phases A/B/C/D must land in Rust as well (≥ 10 additional workdays, approximately doubling the roadmap). Default recommendation: **TS-only PARA reference in v1.9.0; luminclaw-rust scoped to wire-schema parity only; full Rust PARA deferred to v2.0**. This aligns with the existing Rust parity policy (TS-first, Rust ports with identical abstractions) and avoids blocking v1.9.0 on doubled scope. Record the decision in `docs/archive/` and cite in the v1.9.0 `open questions` register.
+
 ---
 
 ## 5. Risks & Open Questions
@@ -298,6 +308,8 @@ These are unresolved design questions from the companion design doc §5. Surface
 3. **Event bus replay window.** In-memory ring buffer for late subscribers, or rely entirely on `GET /v1/tasks/:id`?
 4. **Cross-runtime parity for permission modes.** Port the TS approval gates to Rust first (correctness), or redesign jointly in Phase D?
 5. **Task type taxonomy.** CC has six task types. We likely need three initially: `agent`, `shell`, `teammate`.
+6. **Progressive PARA Tier declaration.** v1.9.0 plan §4.3 declares `tiersSupported: number[]` at `agent.register` time. Should the spec also define `agent.tiers.update { added: number[] }` to let adapters upgrade declaration without re-registering, as phases land? Without this, luminclaw has to either wait for all phases before registering, or register low and re-register — both are ugly.
+7. **Shared `PermissionContext`.** `@prismer/sandbox-runtime` and Phase D both need a permission model. Option (a): define canonical `PermissionContext` in `@prismer/sandbox-runtime`, consumed by luminclaw Phase D. Option (b): each defines its own and they sync via adapter translation. (a) saves ~1.5 days and bakes TS/Rust parity into a shared crate; (b) keeps coupling loose. Default: (a).
 
 ---
 
@@ -308,3 +320,52 @@ These are unresolved design questions from the companion design doc §5. Surface
 3. **Start Phase A (2–3 days).** Highest leverage. Fundamentally changes dual-loop behavior.
 
 Recommended order: **1 → 2 → 3.** Correct the record, quantify the gap, then fix the root cause.
+
+---
+
+## 7. Relationship to v1.9.0 PARA Reference Adapter
+
+v1.9.0 positions luminclaw as `@prismer/adapter-luminclaw`, a full-Tier (L1–L8) PARA reference implementation (see `prismer-cloud-next/docs/ReleasePlan-1.9.0.md` §5.3.3, §7.3). That positioning is **entirely contingent on the phases in §3 landing first**. This section makes the dependency explicit so v1.9.0 planners do not double-book luminclaw workload.
+
+### 7.1 Dependency Chain
+
+The PARA shim (~300–500 LOC per v1.9.0 plan) is a pure translation layer. It cannot fabricate capabilities absent from the host runtime. Concretely:
+
+- `agent.tool.pre` / `agent.tool.post` with exactly-once semantics → requires Pattern 5 with atomic `notified` → **Phase A** (emission path) **+ F** (regression gate).
+- `agent.approval.request` → `result` round-trip where the result reaches the in-flight LLM turn → requires Pattern 1 → **Phase A**.
+- `agent.session.ended { reason: 'stop' | 'crash' | 'quota' }` with exactly-once guarantee → Pattern 5's atomic `notified` → **Phase A**.
+- PARA `SessionExport` (L8) for v2.0 Arena Replay → pre-compaction trace on disk → **Phase B**.
+- PARA remote `cancel` reaching in-flight tool → Pattern 1 + 6 → **Phases A + C**.
+- PARA L5 approval gate end-to-end → Pattern 7 + Pattern 1 → **Phases A + D**.
+
+### 7.2 Honest Tier-Declaration Sequence
+
+If `@prismer/adapter-luminclaw` ships before Phase A completes, it can honestly declare only `tiersSupported: [1, 3, 7]` (L7 delegated to `@prismer/sandbox-runtime`). As phases land, the adapter upgrades its declaration (per Open Question 6 — progressive update protocol needs to exist in PARA spec).
+
+| After phase | Tiers declarable |
+|-------------|------------------|
+| (none)      | L1, L3 (at-completion), L7 |
+| A           | +L2, +L4, L3 becomes incremental |
+| A + B       | +L8 |
+| A + C       | +L6 |
+| A + D       | +L5 |
+| A–F complete | Full L1–L8 (reference status earned, not assumed) |
+
+This sequence is the only one the audit findings in §1 permit. Any faster declaration is overclaim.
+
+### 7.3 Shared Components Opportunity
+
+`@prismer/sandbox-runtime` (v1.9.0 new package) and Phase D both define a `PermissionMode` / `PermissionRule` / approval-request model. These should **not** be implemented twice. Recommendation: canonical `PermissionContext` lives in `@prismer/sandbox-runtime`, consumed directly by Phase D. Benefits:
+
+- Saves ~1.5 workdays on Phase D (half the estimate).
+- TS/Rust parity of permission rules becomes a property of `@prismer/sandbox-runtime`'s language bindings rather than a manually maintained mapping between runtime and sandbox.
+- Canonical `PermissionRule` implementation for other PARA adapters (openclaw, codex) to reuse — strengthens PARA's external-adapter story.
+- PARA spec §5.1 gains a reference implementation, not just a JSON shape.
+
+### 7.4 luminclaw-rust Stance
+
+See §4.3 and §5.2 open question 6. Default: **TS-only PARA reference in v1.9.0; wire-schema-only Rust parity; runtime-level Rust PARA scoped to v2.0**. Until this is decided, any Rust PARA claim is out-of-scope.
+
+### 7.5 Timing Implication for v1.9.0 Plan
+
+The v1.9.0 plan's P3a (`@prismer/adapter-luminclaw` implementation) is scheduled W1–W4 (~3 weeks, two engineers). The audit-driven phases A + B + C + D total 10–12 workdays single-engineer, or 5–7 days with two in parallel. **P3a = those phases + shim + integration test**, not *just* the shim. The v1.9.0 plan's B6 (8-week total) is viable only if P3a is budgeted as "phases A–D in luminclaw + shim", not "shim alone". Otherwise the 32-workday shim estimate is itself overclaim.
