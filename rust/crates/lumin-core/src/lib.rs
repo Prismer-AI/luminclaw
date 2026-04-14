@@ -26,8 +26,10 @@ pub mod artifacts;
 pub mod task;
 pub mod world_model;
 pub mod tokens;
+pub mod abort;
 
 // Re-exports
+pub use abort::AbortReason;
 pub use config::{LuminConfig, ApprovalConfig, SessionConfig, ServerConfig, EventBusConfig, MemoryConfig, LogConfig, ModulesConfig, PrismerConfig};
 pub use provider::{Provider, OpenAIProvider, FallbackProvider, ChatRequest, ChatResponse, ToolCall, ContentBlock, ImageUrlBlock, MessageContent};
 pub use tools::{Tool, ToolRegistry, ToolContext, ToolEvent, EmitFn, safe_path};

@@ -15,6 +15,7 @@ use crate::session::Session;
 use crate::prompt::PromptBuilder;
 use crate::config::LuminConfig;
 use crate::sse::{EventBus, AgentEvent};
+use crate::abort::AbortReason;
 use std::sync::{Arc, Mutex};
 use tracing::{info, error};
 
@@ -22,7 +23,7 @@ pub struct DualLoopAgent {
     pub artifacts: InMemoryArtifactStore,
     pub tasks: InMemoryTaskStore,
     world_model: Mutex<Option<WorldModel>>,
-    cancelled: Arc<Mutex<bool>>,
+    cancelled: Arc<Mutex<Option<AbortReason>>>,
     config: LuminConfig,
 }
 
@@ -32,7 +33,7 @@ impl DualLoopAgent {
             artifacts: InMemoryArtifactStore::new(),
             tasks: InMemoryTaskStore::new(),
             world_model: Mutex::new(None),
-            cancelled: Arc::new(Mutex::new(false)),
+            cancelled: Arc::new(Mutex::new(None)),
             config: LuminConfig::from_env(),
         }
     }
@@ -42,8 +43,18 @@ impl DualLoopAgent {
             artifacts: InMemoryArtifactStore::new(),
             tasks: InMemoryTaskStore::new(),
             world_model: Mutex::new(None),
-            cancelled: Arc::new(Mutex::new(false)),
+            cancelled: Arc::new(Mutex::new(None)),
             config,
+        }
+    }
+
+    /// Cancel with an explicit reason.  `None` defaults to `UserExplicitCancel`.
+    pub fn cancel_with_reason(&self, reason: Option<AbortReason>) {
+        let reason = reason.unwrap_or(AbortReason::UserExplicitCancel);
+        *self.cancelled.lock().unwrap() = Some(reason);
+        if let Some(task) = self.tasks.get_active() {
+            self.tasks.update_status(&task.id, TaskStatus::Failed);
+            info!(task_id = %task.id, reason = reason.as_str(), "task cancelled");
         }
     }
 }
@@ -57,7 +68,7 @@ impl AgentLoop for DualLoopAgent {
     fn mode(&self) -> LoopMode { LoopMode::Dual }
 
     async fn process_message(&self, input: AgentLoopInput, opts: Option<AgentLoopCallOpts>) -> Result<AgentLoopResult, String> {
-        *self.cancelled.lock().unwrap() = false;
+        *self.cancelled.lock().unwrap() = None;
 
         let session_id = input.session_id.unwrap_or_else(|| format!("dual-{}", uuid::Uuid::new_v4()));
         let task_id = uuid::Uuid::new_v4().to_string();
@@ -226,15 +237,11 @@ impl AgentLoop for DualLoopAgent {
     }
 
     fn cancel(&self) {
-        *self.cancelled.lock().unwrap() = true;
-        if let Some(task) = self.tasks.get_active() {
-            self.tasks.update_status(&task.id, TaskStatus::Failed);
-            info!(task_id = %task.id, "task cancelled");
-        }
+        self.cancel_with_reason(None);
     }
 
     async fn shutdown(&self) {
-        self.cancel();
+        self.cancel_with_reason(Some(AbortReason::ServerShutdown));
         *self.world_model.lock().unwrap() = None;
     }
 }
@@ -246,12 +253,12 @@ async fn run_inner_loop(
     session_id: &str,
     _task_id: &str,
     world_model: Option<WorldModel>,
-    cancelled: &Arc<Mutex<bool>>,
+    cancelled: &Arc<Mutex<Option<AbortReason>>>,
     bus: &EventBus,
 ) -> Result<crate::agent::AgentResult, String> {
     // Check cancel before starting
-    if *cancelled.lock().unwrap() {
-        return Err("Cancelled before execution".into());
+    if let Some(reason) = cancelled.lock().unwrap().as_ref() {
+        return Err(format!("Cancelled before execution: {}", reason.as_str()));
     }
 
     let provider = OpenAIProvider::new(
@@ -484,16 +491,30 @@ mod tests {
     #[test]
     fn cancel_sets_cancelled_flag() {
         let agent = DualLoopAgent::new();
-        assert!(!*agent.cancelled.lock().unwrap());
+        assert!(agent.cancelled.lock().unwrap().is_none());
         agent.cancel();
-        assert!(*agent.cancelled.lock().unwrap());
+        assert!(agent.cancelled.lock().unwrap().is_some());
+        assert_eq!(
+            *agent.cancelled.lock().unwrap(),
+            Some(AbortReason::UserExplicitCancel)
+        );
     }
 
     #[test]
     fn cancel_with_no_active_task_sets_flag_only() {
         let agent = DualLoopAgent::new();
         agent.cancel();
-        assert!(*agent.cancelled.lock().unwrap());
+        assert!(agent.cancelled.lock().unwrap().is_some());
+    }
+
+    #[test]
+    fn cancel_with_reason_stores_reason() {
+        let agent = DualLoopAgent::new();
+        agent.cancel_with_reason(Some(AbortReason::Timeout));
+        assert_eq!(
+            *agent.cancelled.lock().unwrap(),
+            Some(AbortReason::Timeout)
+        );
     }
 
     #[test]

@@ -10,6 +10,7 @@ use crate::sse::{EventBus, AgentEvent};
 use crate::agents::{AgentRegistry, AgentMode};
 use crate::directives::Directive;
 use crate::compaction;
+use crate::abort::AbortReason;
 use regex_lite::Regex;
 use std::collections::{HashSet, HashMap};
 use std::sync::{Arc, Mutex};
@@ -405,7 +406,7 @@ impl PrismerAgent {
         &self,
         input: &str,
         session: &mut Session,
-        cancelled: Option<Arc<Mutex<bool>>>,
+        cancelled: Option<Arc<Mutex<Option<AbortReason>>>>,
     ) -> Result<AgentResult, String> {
         self.process_message_full(input, session, cancelled, None, None).await
     }
@@ -415,7 +416,7 @@ impl PrismerAgent {
         &self,
         input: &str,
         session: &mut Session,
-        cancelled: Option<Arc<Mutex<bool>>>,
+        cancelled: Option<Arc<Mutex<Option<AbortReason>>>>,
         memory_context: Option<&str>,
         _images: Option<&[crate::loop_types::ImageRef]>,
     ) -> Result<AgentResult, String> {
@@ -487,8 +488,8 @@ impl PrismerAgent {
 
             // ── Check cancellation flag ──
             if let Some(ref flag) = cancelled {
-                if *flag.lock().unwrap() {
-                    return Err("Cancelled by user".into());
+                if let Some(reason) = flag.lock().unwrap().as_ref() {
+                    return Err(format!("Cancelled: {}", reason.as_str()));
                 }
             }
 
