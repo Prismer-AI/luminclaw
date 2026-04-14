@@ -23,6 +23,7 @@ import type { AgentConfig, AgentRegistry } from './agents.js';
 import type { EventBus, AgentEvent } from './sse.js';
 import type { HookRegistry, HookContext } from './hooks.js';
 import { Session, type Directive } from './session.js';
+import { getAbortReason, AbortReason } from './abort.js';
 import { compactConversation, repairOrphanedToolResults, memoryFlushBeforeCompaction } from './compaction.js';
 import { microcompact } from './microcompact.js';
 import { estimateMessageTokens } from './tokens.js';
@@ -260,6 +261,44 @@ export class PrismerAgent {
     try { return new Set(readdirSync(dirPath).filter(f => f.endsWith('.json'))); } catch { return new Set(); }
   }
 
+  /**
+   * C4: For the latest assistant message with toolCalls, push synthetic
+   * `[Aborted: <reason>]` tool_result messages for any call without a matching
+   * tool_result already present in `state.messages`. Idempotent — calls that
+   * already have a result (including abort-rewritten results from
+   * {@link executeToolCall}) are left alone.
+   */
+  private synthesizeAbortedToolResults(messages: Message[], session: Session): void {
+    const reason = getAbortReason(this.abortSignal?.reason) ?? AbortReason.UserInterrupted;
+    // Find the last assistant message with toolCalls.
+    let lastAssistantIdx = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'assistant' && messages[i].toolCalls?.length) {
+        lastAssistantIdx = i;
+        break;
+      }
+    }
+    if (lastAssistantIdx < 0) return;
+    const assistant = messages[lastAssistantIdx];
+    const calls = assistant.toolCalls ?? [];
+    // Collect tool_call_ids already satisfied by subsequent tool messages.
+    const satisfied = new Set<string>();
+    for (let i = lastAssistantIdx + 1; i < messages.length; i++) {
+      const m = messages[i];
+      if (m.role === 'tool' && m.toolCallId) satisfied.add(m.toolCallId);
+    }
+    for (const call of calls) {
+      if (satisfied.has(call.id)) continue;
+      const toolMsg: Message = {
+        role: 'tool',
+        content: `[Aborted: ${reason}]`,
+        toolCallId: call.id,
+      };
+      messages.push(toolMsg);
+      session.addMessage(toolMsg);
+    }
+  }
+
   /** Execute a single tool call, collecting events for later yielding. */
   private async executeToolCall(
     call: { id: string; name: string; arguments: Record<string, unknown> },
@@ -267,7 +306,8 @@ export class PrismerAgent {
   ): Promise<{ result: { id: string; output: string; error: boolean }; events: AgentEvent[] }> {
     const events: AgentEvent[] = [];
     if (this.abortSignal?.aborted) {
-      return { result: { id: call.id, output: '[Aborted]', error: false }, events };
+      const reason = getAbortReason(this.abortSignal.reason) ?? AbortReason.UserInterrupted;
+      return { result: { id: call.id, output: `[Aborted: ${reason}]`, error: false }, events };
     }
     if (call.name === 'delegate') {
       return this.handleDelegateCall(call, session, toolsUsed);
@@ -303,6 +343,12 @@ export class PrismerAgent {
     this.observer.recordEvent({ type: 'tool_call_end', timestamp: Date.now(), data: { name: call.name, success: !result.error, outputLength: result.output.length } });
     events.push({ type: 'tool.end', data: { sessionId: session.id, tool: call.name, toolId: call.id, result: (result.output || result.error || '').slice(0, 500) } });
     if (this.hooks) await this.hooks.runAfterTool(hookCtx, call.name, result.output || result.error || '', !!result.error);
+    // If the tool's error was caused by abort (in-flight cancellation), replace
+    // with a structured [Aborted: <reason>] marker so history is well-formed.
+    if (result.error && this.abortSignal?.aborted) {
+      const reason = getAbortReason(this.abortSignal.reason) ?? AbortReason.UserInterrupted;
+      return { result: { id: call.id, output: `[Aborted: ${reason}]`, error: false }, events };
+    }
     return { result: { id: call.id, output: result.error ? `Error: ${result.error}` : result.output, error: !!result.error }, events };
   }
 
@@ -368,7 +414,13 @@ export class PrismerAgent {
     };
 
     while (state.iteration++ < this.maxIterations) {
-      if (this.abortSignal?.aborted) { state.lastText = '[Aborted by user]'; break; }
+      if (this.abortSignal?.aborted) {
+        // C4: synthesize [Aborted: <reason>] tool_result for any in-flight tool_calls
+        // from the most recent assistant message that didn't get a matching result.
+        this.synthesizeAbortedToolResults(state.messages, session);
+        state.lastText = '[Aborted by user]';
+        break;
+      }
 
       // A4: fire onIterationStart callback (DualLoopAgent uses this to drain MessageQueue)
       if (this.onIterationStart) {
